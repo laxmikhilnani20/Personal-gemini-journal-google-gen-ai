@@ -91,6 +91,8 @@ export interface JournalTurn {
   text: string;
   timestamp: string;
   mode?: 'chat' | 'brainstorm' | 'summary' | 'reflection';
+  primaryEmotion?: string;
+  stressScore?: number;
 }
 
 export interface ReflectionSummary {
@@ -110,10 +112,31 @@ export interface ReflectionSession {
   category: ReflectionCategory;
   mood: ReflectionMood;
   turns: JournalTurn[];
+  replyText?: string;
+  primaryEmotion?: string;
+  stressScore?: number;
   summary?: ReflectionSummary;
   tags?: string[];
   modelUsed: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface MoodOverviewData {
+  primaryEmotion: string;
+  stressScore: number;
+  assessedAt?: string;
+  sampleThought?: string;
+}
+
+export interface JournalEntryResponse {
+  success: boolean;
+  replyText: string;
+  reply?: string;
+  primaryEmotion: string;
+  stressScore: number;
+  firestorePersisted?: boolean;
+  modelUsed?: string;
+  latencyMs?: number;
 }
 

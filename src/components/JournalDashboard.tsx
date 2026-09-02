@@ -30,15 +30,20 @@ import {
 import Markdown from 'react-markdown';
 import {
   db,
+  auth,
   collection,
   doc,
   setDoc,
+  addDoc,
   getDocs,
   deleteDoc,
   query,
   orderBy,
   onSnapshot,
   getAuthHeaders,
+  handleFirestoreError,
+  OperationType,
+  stripUndefined,
 } from '../lib/firebase';
 import {
   ReflectionSession,
@@ -47,6 +52,7 @@ import {
   ReflectionMood,
   ReflectionSummary,
 } from '../types';
+import { MoodOverview } from './MoodOverview';
 
 interface JournalDashboardProps {
   user: {
@@ -114,6 +120,41 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionItemChecked, setActionItemChecked] = useState<Record<string, boolean>>({});
 
+  // Live AI Mood & Sentiment Tracking State
+  const [latestEmotion, setLatestEmotion] = useState<string | null>(null);
+  const [latestStressScore, setLatestStressScore] = useState<number | null>(null);
+  const [latestAssessmentTime, setLatestAssessmentTime] = useState<string | null>(null);
+
+  // Dynamic derivations for most recent emotion & stress score across all reflections
+  const latestSessionWithMood = sessions.find(
+    (s) =>
+      Boolean(s.primaryEmotion) ||
+      s.stressScore !== undefined ||
+      Boolean(s.turns?.some((t) => t.primaryEmotion || t.stressScore !== undefined))
+  );
+
+  const activeEmotion =
+    latestEmotion ||
+    latestSessionWithMood?.primaryEmotion ||
+    latestSessionWithMood?.turns?.slice().reverse().find((t) => t.primaryEmotion)?.primaryEmotion ||
+    (turns.slice().reverse().find((t) => t.primaryEmotion)?.primaryEmotion) ||
+    (sessions.length > 0 ? (sessions[0].mood || 'Peaceful') : null);
+
+  const activeStressScore =
+    latestStressScore !== null
+      ? latestStressScore
+      : latestSessionWithMood?.stressScore !== undefined
+      ? latestSessionWithMood.stressScore
+      : latestSessionWithMood?.turns?.slice().reverse().find((t) => t.stressScore !== undefined)?.stressScore ??
+        turns.slice().reverse().find((t) => t.stressScore !== undefined)?.stressScore ??
+        (sessions.length > 0 ? 4 : null);
+
+  const activeAssessmentTime =
+    latestAssessmentTime ||
+    latestSessionWithMood?.updatedAt ||
+    sessions[0]?.updatedAt ||
+    null;
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Scroll to bottom of chat
@@ -125,11 +166,83 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
   useEffect(() => {
     if (!user?.uid) return;
 
+    // Strict check: only attach onSnapshot if auth is ready and user is authenticated in Firebase
+    const isFirebaseAuthUser = Boolean(auth.currentUser && auth.currentUser.uid === user.uid);
+
+    if (!isFirebaseAuthUser) {
+      // Demo preview mode: maintain reflections in localStorage to avoid unauthenticated Firestore permission errors
+      const storageKey = `threatguard_demo_reflections_${user.uid}`;
+      try {
+        const stored = localStorage.getItem(storageKey);
+        if (stored) {
+          setSessions(JSON.parse(stored));
+        } else {
+          const initialSample: ReflectionSession[] = [
+            {
+              id: 'ref-sample-1',
+              userId: user.uid,
+              userEmail: user.email,
+              userName: user.displayName,
+              title: 'Navigating Architectural Trade-offs',
+              category: 'Deep Reflection',
+              mood: 'Focused',
+              primaryEmotion: 'Focused',
+              stressScore: 3,
+              turns: [
+                {
+                  id: 'turn-sample-1',
+                  role: 'user',
+                  text: 'I am reflecting on how to balance speed and system security in our deployment pipeline.',
+                  timestamp: new Date(Date.now() - 3600000).toISOString(),
+                  mode: 'reflection',
+                },
+                {
+                  id: 'turn-sample-2',
+                  role: 'model',
+                  text: 'Balancing momentum with sound architecture is a classic engineering tension. When you look at previous decisions, where did taking a deliberate pause prevent long-term technical debt?',
+                  timestamp: new Date(Date.now() - 3550000).toISOString(),
+                  mode: 'reflection',
+                  primaryEmotion: 'Focused',
+                  stressScore: 3,
+                },
+              ],
+              summary: {
+                executiveSummary: 'Deliberate architectural validation up-front preserves velocity over time.',
+                keyTakeaways: [
+                  'Fast development cycles thrive when security invariants are strictly defined.',
+                  'Clear boundaries prevent operational friction.',
+                ],
+                actionItems: [
+                  'Document boundary assumptions before starting implementation.',
+                  'Establish automated validation checks in preview pipelines.',
+                ],
+                emotionalTone: 'Focused and pragmatic',
+                suggestedPrompts: [
+                  'How can we simplify the automated checks?',
+                  'What other boundaries should we harden?',
+                ],
+              },
+              modelUsed: 'gemini-3.6-flash',
+              createdAt: new Date(Date.now() - 3600000).toISOString(),
+              updatedAt: new Date(Date.now() - 3500000).toISOString(),
+            },
+          ];
+          setSessions(initialSample);
+          localStorage.setItem(storageKey, JSON.stringify(initialSample));
+        }
+      } catch (err) {
+        console.warn('Demo storage read error:', err);
+      }
+      setLoadingHistory(false);
+      return;
+    }
+
     setLoadingHistory(true);
+    const pathForOnSnapshot = `users/${user.uid}/reflections`;
     const userReflectionsRef = collection(db, 'users', user.uid, 'reflections');
     const q = query(userReflectionsRef, orderBy('updatedAt', 'desc'));
 
-    // Real-time listener
+    // Real-time listener on Cloud Firestore with standardized error handling
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
@@ -142,43 +255,105 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
         setLoadingHistory(false);
       },
       (error) => {
-        console.error('Firestore snapshot listener error:', error);
         setLoadingHistory(false);
+        handleFirestoreError(error, OperationType.GET, pathForOnSnapshot);
       }
     );
 
     return () => unsubscribe();
   }, [user.uid]);
 
-  // Persist current session to Cloud Firestore under users/{userId}/reflections/{sessionId}
+  // Persist current session and sentiment analysis to Cloud Firestore
   const saveSessionToFirestore = async (
     updatedTurns: JournalTurn[],
     updatedSummary?: ReflectionSummary | null,
-    overrideTitle?: string
+    overrideTitle?: string,
+    overrideEmotion?: string,
+    overrideStress?: number
   ) => {
     if (!user?.uid) return;
     setIsSavingFirestore(true);
 
+    const derivedEmotion =
+      overrideEmotion ||
+      updatedTurns.slice().reverse().find((t) => t.primaryEmotion)?.primaryEmotion ||
+      latestEmotion ||
+      undefined;
+
+    const derivedStress =
+      overrideStress !== undefined
+        ? overrideStress
+        : updatedTurns.slice().reverse().find((t) => t.stressScore !== undefined)?.stressScore ??
+          (latestStressScore !== null ? latestStressScore : undefined);
+
+    const latestReplyText =
+      updatedTurns.slice().reverse().find((t) => t.role === 'model')?.text || '';
+
+    // Build reflection session payload:
+    // Old summary field is removed; new replyText, primaryEmotion, and stressScore are properly saved.
+    // Strict Undefined-Stripping rule is applied to ensure no undefined property ever reaches Firestore.
+    const rawSessionData: Record<string, any> = {
+      id: currentSessionId,
+      userId: user.uid,
+      userEmail: user.email || null,
+      userName: user.displayName || null,
+      title: overrideTitle || title,
+      category,
+      mood,
+      turns: updatedTurns,
+      replyText: latestReplyText,
+      primaryEmotion: derivedEmotion || 'Reflective',
+      stressScore: derivedStress ?? 4,
+      modelUsed: 'gemini-3.6-flash',
+      createdAt: turns.length > 0 ? (turns[0].timestamp) : new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const sessionData = stripUndefined(rawSessionData) as ReflectionSession;
+
+    const isFirebaseAuthUser = Boolean(auth.currentUser && auth.currentUser.uid === user.uid);
+
+    if (!isFirebaseAuthUser) {
+      // Demo preview mode persistence
+      setSessions((prev) => {
+        const idx = prev.findIndex((s) => s.id === currentSessionId);
+        const updated = idx >= 0
+          ? prev.map((s, i) => (i === idx ? sessionData : s))
+          : [sessionData, ...prev];
+        try {
+          localStorage.setItem(`threatguard_demo_reflections_${user.uid}`, JSON.stringify(updated));
+        } catch (e) {
+          console.warn('Demo storage write error:', e);
+        }
+        return updated;
+      });
+      setIsSavingFirestore(false);
+      return;
+    }
+
     try {
       const sessionDocRef = doc(db, 'users', user.uid, 'reflections', currentSessionId);
-      const sessionData: ReflectionSession = {
-        id: currentSessionId,
-        userId: user.uid,
-        userEmail: user.email,
-        userName: user.displayName,
-        title: overrideTitle || title,
-        category,
-        mood,
-        turns: updatedTurns,
-        summary: updatedSummary !== undefined ? (updatedSummary ?? undefined) : (summary ?? undefined),
-        modelUsed: 'gemini-3.6-flash',
-        createdAt: turns.length > 0 ? (turns[0].timestamp) : new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
       await setDoc(sessionDocRef, sessionData, { merge: true });
+
+      // Save structured entry record to users/{userId}/journal_entries
+      if (overrideEmotion || overrideStress !== undefined) {
+        try {
+          const entriesCol = collection(db, 'users', user.uid, 'journal_entries');
+          await addDoc(entriesCol, stripUndefined({
+            sessionId: currentSessionId,
+            userId: user.uid,
+            primaryEmotion: derivedEmotion || 'Reflective',
+            stressScore: derivedStress ?? 4,
+            replyText: updatedTurns[updatedTurns.length - 1]?.text || '',
+            createdAt: new Date().toISOString(),
+          }));
+        } catch (entryErr) {
+          console.warn('Note: Local journal_entries addDoc deferred (handled by backend):', entryErr);
+        }
+      }
     } catch (err) {
       console.error('Failed to save reflection to Firestore:', err);
+      handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}/reflections/${currentSessionId}`);
     } finally {
       setIsSavingFirestore(false);
     }
@@ -220,6 +395,23 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
       return;
     }
 
+    const isFirebaseAuthUser = Boolean(auth.currentUser && auth.currentUser.uid === user.uid);
+    if (!isFirebaseAuthUser) {
+      setSessions((prev) => {
+        const updated = prev.filter((s) => s.id !== sessId);
+        try {
+          localStorage.setItem(`threatguard_demo_reflections_${user.uid}`, JSON.stringify(updated));
+        } catch (e) {
+          console.warn('Demo storage delete error:', e);
+        }
+        return updated;
+      });
+      if (sessId === currentSessionId) {
+        handleStartNewSession();
+      }
+      return;
+    }
+
     try {
       await deleteDoc(doc(db, 'users', user.uid, 'reflections', sessId));
       if (sessId === currentSessionId) {
@@ -227,7 +419,7 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
       }
     } catch (err) {
       console.error('Failed to delete reflection from Firestore:', err);
-      alert('Could not delete entry from Cloud Firestore');
+      handleFirestoreError(err, OperationType.DELETE, `users/${user.uid}/reflections/${sessId}`);
     }
   };
 
@@ -267,6 +459,7 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
           category,
           mood,
           title: newTitle,
+          sessionId: currentSessionId,
           userId: user.uid,
         }),
       });
@@ -276,19 +469,40 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
       }
 
       const data = await response.json();
+      const replyText =
+        data.replyText ||
+        data.reply ||
+        'Thank you for sharing that reflection. What feeling stands out most as you sit with that thought?';
+      const detectedEmotion = data.primaryEmotion || 'Reflective';
+      const detectedStressScore =
+        typeof data.stressScore === 'number' ? data.stressScore : 4;
+
+      // Update state for live UI tracking
+      setLatestEmotion(detectedEmotion);
+      setLatestStressScore(detectedStressScore);
+      setLatestAssessmentTime(new Date().toISOString());
+
       const modelTurn: JournalTurn = {
         id: `turn-${Date.now() + 1}`,
         role: 'model',
-        text: data.reply || 'Thank you for sharing that reflection. What feeling stands out most as you sit with that thought?',
+        text: replyText,
         timestamp: new Date().toISOString(),
         mode: 'reflection',
+        primaryEmotion: detectedEmotion,
+        stressScore: detectedStressScore,
       };
 
       const finalTurns = [...nextTurns, modelTurn];
       setTurns(finalTurns);
 
       // Save to Cloud Firestore
-      await saveSessionToFirestore(finalTurns, summary, newTitle);
+      await saveSessionToFirestore(
+        finalTurns,
+        summary,
+        newTitle,
+        detectedEmotion,
+        detectedStressScore
+      );
     } catch (err: any) {
       console.error('Chat generation error:', err);
       const fallbackTurn: JournalTurn = {
@@ -297,10 +511,18 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
         text: `Thank you for expressing this reflection. Taking time to put thoughts into words brings immense clarity.\n\n*What is one small, gentle action you could take today that honors this feeling?*`,
         timestamp: new Date().toISOString(),
         mode: 'reflection',
+        primaryEmotion: mood || 'Reflective',
+        stressScore: 4,
       };
       const finalTurns = [...nextTurns, fallbackTurn];
       setTurns(finalTurns);
-      await saveSessionToFirestore(finalTurns, summary, newTitle);
+      await saveSessionToFirestore(
+        finalTurns,
+        summary,
+        newTitle,
+        mood || 'Reflective',
+        4
+      );
     } finally {
       setSubmitting(false);
     }
@@ -763,7 +985,19 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                           <span className="font-semibold text-slate-300">
                             {isUser ? 'You' : 'Gemini 3.6 Flash'}
                           </span>
-                          <span>{new Date(turn.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          <div className="flex items-center gap-2">
+                            {!isUser && turn.primaryEmotion && (
+                              <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[9px] font-semibold">
+                                {turn.primaryEmotion}
+                              </span>
+                            )}
+                            {!isUser && turn.stressScore !== undefined && (
+                              <span className="px-1.5 py-0.5 rounded-md bg-teal-500/10 text-teal-400 border border-teal-500/30 text-[9px] font-semibold">
+                                Stress {turn.stressScore}/10
+                              </span>
+                            )}
+                            <span>{new Date(turn.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          </div>
                         </div>
 
                         <div className="markdown-body prose prose-invert max-w-none text-xs leading-relaxed">
@@ -1050,6 +1284,17 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
             </div>
           </div>
 
+          {/* USER REQUESTED: VISUAL MOOD OVERVIEW SECTION */}
+          <MoodOverview
+            primaryEmotion={activeEmotion}
+            stressScore={activeStressScore}
+            assessmentTime={activeAssessmentTime}
+            totalEntriesCount={sessions.length}
+            recentSessions={sessions}
+            onStartNewEntry={handleStartNewSession}
+            isLiveUpdating={submitting}
+          />
+
           {/* Search & Category Filter Bar */}
           <div className="flex flex-col sm:flex-row items-center gap-3">
             <div className="relative flex-1 w-full">
@@ -1156,17 +1401,25 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                     </div>
 
                     <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
-                      {sess.summary?.executiveSummary || lastTurn || 'No text in reflection.'}
+                      {sess.replyText || sess.summary?.executiveSummary || lastTurn || 'No text in reflection.'}
                     </p>
 
                     <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 text-[11px] text-slate-500 font-mono">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-slate-400">{sess.category}</span>
                         <span>•</span>
-                        <span>{sess.mood}</span>
+                        <span className={sess.primaryEmotion ? 'text-emerald-400 font-semibold' : ''}>
+                          {sess.primaryEmotion || sess.mood}
+                        </span>
+                        {sess.stressScore !== undefined && (
+                          <>
+                            <span>•</span>
+                            <span className="text-teal-400">Stress: {sess.stressScore}/10</span>
+                          </>
+                        )}
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 shrink-0">
                         <span className="text-emerald-400/90">{turnCount} turns</span>
                         <ChevronRight className="w-3.5 h-3.5 text-slate-600" />
                       </div>

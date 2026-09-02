@@ -446,6 +446,14 @@ async function generateContentWithFallback(
 }
 
 function generateSynthesizedFallback(prompt: string): string {
+  if (prompt.includes('primaryEmotion') || prompt.includes('stressScore') || prompt.includes('replyText') || prompt.includes('Journaler')) {
+    return JSON.stringify({
+      replyText: "Thank you for sharing that reflection. Pausing to examine your thoughts brings immense clarity.\n\n*What is one small, gentle action you could take today that honors this feeling?*",
+      primaryEmotion: "Reflective",
+      stressScore: 4
+    });
+  }
+
   return JSON.stringify({
     summary: 'Automated Rule-Engine Security Evaluation executed successfully.',
     threats: [
@@ -852,34 +860,224 @@ app.post('/api/test-fallback', async (req: Request, res: Response) => {
 
 // ==========================================
 // 5B. USER-AUTHENTICATED JOURNAL & REFLECTION API
-// (Powered by Gemini 3.6 Flash with Fallback Resilience)
+// (Powered by Gemini 3.6 Flash with Fallback Resilience & Firestore Persistence)
 // ==========================================
 
-// Multi-turn Journal Conversation Endpoint
-app.post('/api/journal/chat', async (req: Request, res: Response) => {
+interface SaveEntryParams {
+  userId: string;
+  sessionId: string;
+  entryId: string;
+  replyText: string;
+  primaryEmotion: string;
+  stressScore: number;
+  currentThought: string;
+  category: string;
+  mood: string;
+  title: string;
+  userAuthHeader?: string;
+}
+
+interface SaveReflectionParams {
+  userId: string;
+  sessionId: string;
+  title: string;
+  category: string;
+  mood: string;
+  replyText: string;
+  primaryEmotion: string;
+  stressScore: number;
+  userAuthHeader?: string;
+  modelUsed?: string;
+}
+
+/**
+ * Strict Undefined-Stripping Rule (Backend):
+ * Recursively removes all undefined keys and nested undefined values from objects/arrays,
+ * ensuring no payload ever sends an undefined value to Cloud Firestore.
+ */
+function stripUndefinedBackend<T>(obj: T): T {
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) {
+    return obj
+      .filter((x) => x !== undefined)
+      .map(stripUndefinedBackend) as unknown as T;
+  }
+  if (typeof obj === 'object' && !(obj instanceof Date)) {
+    const res: Record<string, any> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (v !== undefined) {
+        res[k] = stripUndefinedBackend(v);
+      }
+    }
+    return res as T;
+  }
+  return obj;
+}
+
+// Persist reflection session data to Cloud Firestore under users/{userId}/reflections/{sessionId}
+// Note: The old summary field is completely removed; replyText, primaryEmotion, and stressScore are properly saved.
+async function saveReflectionToFirestore(
+  params: SaveReflectionParams
+): Promise<{ success: boolean; firestoreId?: string; warning?: string }> {
+  const timestamp = new Date().toISOString();
+  try {
+    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+
+    const cleaned = stripUndefinedBackend(params);
+    const reflectionUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(cleaned.userId)}/reflections/${encodeURIComponent(cleaned.sessionId)}`;
+
+    // Build Firestore REST fields without the old summary field
+    const firestoreReflectionDoc = {
+      fields: {
+        id: { stringValue: cleaned.sessionId },
+        userId: { stringValue: cleaned.userId },
+        title: { stringValue: cleaned.title || 'Journal Reflection' },
+        category: { stringValue: cleaned.category || 'Deep Reflection' },
+        mood: { stringValue: cleaned.mood || 'Calm' },
+        replyText: { stringValue: cleaned.replyText || '' },
+        primaryEmotion: { stringValue: cleaned.primaryEmotion || 'Reflective' },
+        stressScore: { integerValue: String(typeof cleaned.stressScore === 'number' ? Math.round(cleaned.stressScore) : 4) },
+        modelUsed: { stringValue: cleaned.modelUsed || 'gemini-3.6-flash' },
+        updatedAt: { stringValue: timestamp },
+      },
+    };
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (cleaned.userAuthHeader) {
+      headers['Authorization'] = cleaned.userAuthHeader.startsWith('Bearer ')
+        ? cleaned.userAuthHeader
+        : `Bearer ${cleaned.userAuthHeader}`;
+    }
+
+    const res = await fetch(reflectionUrl, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify(firestoreReflectionDoc),
+    });
+
+    if (res.ok) {
+      const docData = await res.json();
+      console.log(`[Firestore Backend Reflection] Successfully saved reflection to users/${cleaned.userId}/reflections/${cleaned.sessionId}`);
+      return { success: true, firestoreId: docData.name };
+    } else {
+      const errText = await res.text().catch(() => '');
+      console.warn(`[Firestore Backend Reflection] Note: Firestore returned HTTP ${res.status}: ${errText.substring(0, 160)}`);
+      return { success: false, warning: `Firestore returned HTTP ${res.status}` };
+    }
+  } catch (err: any) {
+    console.warn('[Firestore Backend Reflection] Exception caught safely:', err?.message || err);
+    return { success: false, warning: err?.message || 'Firestore connection deferred' };
+  }
+}
+
+// Persist structured entry data to Cloud Firestore under users/{userId}/journal_entries
+async function saveJournalEntryToFirestore(
+  params: SaveEntryParams
+): Promise<{ success: boolean; firestoreId?: string; warning?: string }> {
+  const timestamp = new Date().toISOString();
+  try {
+    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+
+    const cleaned = stripUndefinedBackend(params);
+    const entriesUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(cleaned.userId)}/journal_entries`;
+
+    const firestoreEntryDoc = {
+      fields: {
+        id: { stringValue: cleaned.entryId },
+        sessionId: { stringValue: cleaned.sessionId },
+        userId: { stringValue: cleaned.userId },
+        thought: { stringValue: cleaned.currentThought },
+        replyText: { stringValue: cleaned.replyText },
+        primaryEmotion: { stringValue: cleaned.primaryEmotion },
+        stressScore: { integerValue: String(cleaned.stressScore) },
+        category: { stringValue: cleaned.category },
+        declaredMood: { stringValue: cleaned.mood },
+        title: { stringValue: cleaned.title },
+        createdAt: { stringValue: timestamp },
+        updatedAt: { stringValue: timestamp },
+      },
+    };
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (cleaned.userAuthHeader) {
+      headers['Authorization'] = cleaned.userAuthHeader.startsWith('Bearer ')
+        ? cleaned.userAuthHeader
+        : `Bearer ${cleaned.userAuthHeader}`;
+    }
+
+    const res = await fetch(entriesUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(firestoreEntryDoc),
+    });
+
+    if (res.ok) {
+      const docData = await res.json();
+      console.log(`[Firestore Backend Persistence] Successfully saved entry to users/${cleaned.userId}/journal_entries`);
+      return { success: true, firestoreId: docData.name };
+    } else {
+      const errText = await res.text().catch(() => '');
+      console.warn(`[Firestore Backend Persistence] Note: Firestore returned HTTP ${res.status}: ${errText.substring(0, 160)}`);
+      return { success: false, warning: `Firestore returned HTTP ${res.status}` };
+    }
+  } catch (err: any) {
+    console.warn('[Firestore Backend Persistence] Exception caught safely:', err?.message || err);
+    return { success: false, warning: err?.message || 'Firestore connection deferred' };
+  }
+}
+
+// Unified Journal Entry Handler (Prompts Gemini for replyText, single-word primaryEmotion, and 1-10 stressScore)
+async function handleJournalEntry(req: Request, res: Response): Promise<void> {
   try {
     const body = req.body && typeof req.body === 'object' ? req.body : {};
     const messages = Array.isArray(body.messages) ? body.messages : [];
-    const currentThought = String(body.currentThought || '').trim();
+    const currentThought = String(body.currentThought || body.thought || body.entry || '').trim();
     const category = String(body.category || 'Deep Reflection').trim();
     const mood = String(body.mood || 'Calm').trim();
     const sessionTitle = String(body.title || 'Journal Reflection').trim();
+    const sessionId = String(body.sessionId || `ref-${Date.now()}`).trim();
 
     if (!currentThought && messages.length === 0) {
       res.status(400).json({ error: 'No prompt or reflection text provided' });
       return;
     }
 
-    const systemInstruction = `You are a mindful, insightful, and compassionate AI Journal & Reflection Partner.
+    const systemInstruction = `You are a mindful, insightful, and compassionate AI Journal & Reflection Partner and Emotional Sentiment Analyst.
 Your role:
-- Help the user explore their inner thoughts, feelings, ambitions, and daily experiences with nuance and warmth.
-- When the user shares reflections, validate their experience, highlight underlying insights or patterns, and ask 1-2 thoughtful, open-ended questions to deepen their self-awareness.
-- Category context: ${category}
-- User's present mood: ${mood}
-- Session title: "${sessionTitle}"
-- Keep your tone conversational, grounded, empathetic, and constructive.
-- Format responses cleanly using Markdown for emphasis, bullet points, or poetic pacing when suitable.
-- Do not be preachy or clinical; be a trusted thought partner for genuine personal clarity.`;
+- Deeply understand the user's thoughts, feelings, ambitions, and daily experiences with warmth and nuanced perception.
+- Validate their experience and formulate an empathetic, constructive response that highlights personal insights and poses 1-2 thoughtful, open-ended questions to deepen self-awareness.
+- Accurately assess the user's emotional state and current cognitive stress level based on their reflection.
+
+CRITICAL JSON OUTPUT REQUIREMENT:
+You MUST return your response as a valid JSON object strictly matching this schema:
+{
+  "replyText": "Your empathetic, insightful reflection and thoughtful follow-up question. Format with clean Markdown for emphasis, bullet points, or poetic pacing when suitable.",
+  "primaryEmotion": "A single word describing the user's primary emotional state or mood (e.g. Grateful, Anxious, Peaceful, Overwhelmed, Inspired, Pensive, Hopeful, Exhausted, Resilient, Focused, Melancholy, Determined)",
+  "stressScore": 4
+}
+
+Guidelines for JSON fields:
+1. "replyText": string. Grounded, conversational, empathetic, and constructive. Never clinical, patronizing, or robotic.
+2. "primaryEmotion": string. EXACTLY ONE SINGLE WORD summarizing the user's dominant mood.
+3. "stressScore": number. An integer between 1 and 10 indicating perceived stress/tension level:
+   - 1-3: Low stress (deep calm, peace, content, ease, restoration)
+   - 4-6: Moderate stress (balanced tension, focused reflection, mild concern, actively working through challenges)
+   - 7-8: Elevated stress (notable anxiety, strain, pressure, heavy cognitive load)
+   - 9-10: High stress (severe overwhelm, acute distress, exhaustion, crisis)
+
+Category context: ${category}
+User's declared initial mood: ${mood}
+Session title: "${sessionTitle}"
+
+Output ONLY the JSON object. No preamble, no commentary before or after.`;
 
     // Construct multi-turn context
     let formattedPrompt = '';
@@ -892,22 +1090,161 @@ Your role:
     }
 
     if (currentThought) {
-      formattedPrompt += `[Journaler's New Reflection Entry]:\n${currentThought}\n\nPlease respond with your empathetic reflection and thoughtful follow-up question.`;
+      formattedPrompt += `[Journaler's New Reflection Entry]:\n${currentThought}\n\nPlease analyze the emotional sentiment, determine the single-word primaryEmotion and 1-10 stressScore, and formulate your replyText conforming strictly to the requested JSON format.`;
     }
 
     const result = await generateContentWithFallback(formattedPrompt, systemInstruction);
 
+    // Parse structured JSON response from Gemini
+    let replyText = '';
+    let primaryEmotion = 'Reflective';
+    let stressScore = 4;
+
+    try {
+      const cleanJson = result.text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const parsed = JSON.parse(cleanJson);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.replyText === 'string' && parsed.replyText.trim()) {
+          replyText = parsed.replyText.trim();
+        }
+        if (typeof parsed.primaryEmotion === 'string' && parsed.primaryEmotion.trim()) {
+          const words = parsed.primaryEmotion.trim().split(/\s+/);
+          primaryEmotion = words[0].charAt(0).toUpperCase() + words[0].slice(1).toLowerCase();
+        }
+        if (typeof parsed.stressScore === 'number' && !isNaN(parsed.stressScore)) {
+          stressScore = Math.max(1, Math.min(10, Math.round(parsed.stressScore)));
+        } else if (typeof parsed.stressScore === 'string') {
+          const num = parseInt(parsed.stressScore, 10);
+          if (!isNaN(num)) {
+            stressScore = Math.max(1, Math.min(10, num));
+          }
+        }
+      }
+    } catch (parseErr) {
+      console.warn('[Journal Entry] Fallback regex parsing for Gemini JSON response:', parseErr);
+      const replyMatch = result.text.match(/"replyText"\s*:\s*"([\s\S]*?)(?<!\\)"/);
+      const emotionMatch = result.text.match(/"primaryEmotion"\s*:\s*"([^"]+)"/);
+      const stressMatch = result.text.match(/"stressScore"\s*:\s*(\d+)/);
+
+      if (replyMatch && replyMatch[1]) {
+        replyText = replyMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+      } else {
+        replyText = result.text || 'Thank you for expressing this reflection. Pausing to examine thoughts brings immense clarity.';
+      }
+
+      if (emotionMatch && emotionMatch[1]) {
+        primaryEmotion = emotionMatch[1].trim().split(/\s+/)[0];
+        primaryEmotion = primaryEmotion.charAt(0).toUpperCase() + primaryEmotion.slice(1).toLowerCase();
+      } else {
+        primaryEmotion = mood || 'Reflective';
+      }
+
+      if (stressMatch && stressMatch[1]) {
+        stressScore = Math.max(1, Math.min(10, parseInt(stressMatch[1], 10)));
+      }
+    }
+
+    if (!replyText) {
+      replyText = result.text || 'Thank you for sharing that reflection. What feeling stands out most as you sit with that thought?';
+    }
+
+    // Save structured entry data and update reflection document in Cloud Firestore
+    const entryId = `entry-${Date.now()}`;
+    const verifiedUser = (req as any).user;
+    const targetUserId = verifiedUser?.uid || String(body.userId || 'demo-user-7842');
+    const userAuthHeader = (req.headers.authorization || (req.headers as any)['Authorization']) as string | undefined;
+
+    const [firestoreSaveResult, reflectionSaveResult] = await Promise.all([
+      saveJournalEntryToFirestore({
+        userId: targetUserId,
+        sessionId,
+        entryId,
+        replyText,
+        primaryEmotion,
+        stressScore,
+        currentThought,
+        category,
+        mood,
+        title: sessionTitle,
+        userAuthHeader,
+      }),
+      saveReflectionToFirestore({
+        userId: targetUserId,
+        sessionId,
+        title: sessionTitle,
+        category,
+        mood,
+        replyText,
+        primaryEmotion,
+        stressScore,
+        userAuthHeader,
+        modelUsed: result.modelUsed,
+      }),
+    ]);
+
     res.json({
       success: true,
-      reply: result.text,
+      replyText,
+      reply: replyText, // backward compatibility
+      primaryEmotion,
+      stressScore,
+      firestorePersisted: firestoreSaveResult.success,
+      reflectionPersisted: reflectionSaveResult.success,
+      entryId,
+      sessionId,
       modelUsed: result.modelUsed,
       latencyMs: result.latencyMs,
       simulated: result.simulated || false,
     });
   } catch (err: any) {
-    console.error('Journal chat error:', err);
+    console.error('Journal entry error:', err);
     res.status(500).json({
-      error: 'Failed to process reflection entry',
+      error: 'Failed to process journal reflection entry',
+      details: err?.message || 'Internal server error',
+    });
+  }
+}
+
+// Multi-turn Journal Conversation & Entry Endpoints
+app.post('/api/journal/chat', handleJournalEntry);
+app.post('/api/journal/entry', handleJournalEntry);
+
+// Direct Reflection Persistence Endpoint (Enforces Strict Undefined-Stripping & excludes old summary)
+app.post('/api/journal/reflection', async (req: Request, res: Response) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const verifiedUser = (req as any).user;
+    const userId = verifiedUser?.uid || String(body.userId || 'demo-user-7842');
+    const sessionId = String(body.sessionId || body.id || `ref-${Date.now()}`);
+    const title = String(body.title || 'Journal Reflection');
+    const category = String(body.category || 'Deep Reflection');
+    const mood = String(body.mood || 'Reflective');
+    const replyText = String(body.replyText || body.reply || '');
+    const primaryEmotion = String(body.primaryEmotion || mood || 'Reflective');
+    const stressScore = typeof body.stressScore === 'number' ? body.stressScore : 4;
+    const userAuthHeader = (req.headers.authorization || (req.headers as any)['Authorization']) as string | undefined;
+
+    const result = await saveReflectionToFirestore({
+      userId,
+      sessionId,
+      title,
+      category,
+      mood,
+      replyText,
+      primaryEmotion,
+      stressScore,
+      userAuthHeader,
+      modelUsed: body.modelUsed,
+    });
+
+    res.json({
+      success: result.success,
+      warning: result.warning,
+      sessionId,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      error: 'Failed to persist reflection session',
       details: err?.message || 'Internal server error',
     });
   }

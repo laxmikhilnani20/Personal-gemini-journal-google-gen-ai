@@ -1,0 +1,151 @@
+{
+  "entities": {
+    "reflection": {
+      "title": "Reflection",
+      "description": "A multi-turn AI journaling and self-reflection session.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique session identifier.",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user who owns this reflection.",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "description": "Descriptive title for the reflection session.",
+          "maxLength": 200
+        },
+        "category": {
+          "type": "string",
+          "description": "Category for the session such as Deep Reflection, Gratitude, etc.",
+          "maxLength": 100
+        },
+        "mood": {
+          "type": "string",
+          "description": "Declared mood of the user.",
+          "maxLength": 50
+        },
+        "replyText": {
+          "type": "string",
+          "description": "Empathetic reply text from AI reflection partner.",
+          "maxLength": 10000
+        },
+        "primaryEmotion": {
+          "type": "string",
+          "description": "Single-word primary emotion analyzed by Gemini.",
+          "maxLength": 50
+        },
+        "stressScore": {
+          "type": "number",
+          "description": "Perceived cognitive stress level on a scale from 1 to 10."
+        },
+        "modelUsed": {
+          "type": "string",
+          "description": "AI model identifier used for generating reflections.",
+          "maxLength": 100
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp string when session was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp string when session was last modified."
+        }
+      },
+      "required": ["id", "userId", "title"]
+    },
+    "journalEntry": {
+      "title": "JournalEntry",
+      "description": "A single prompt-response entry recording emotional sentiment and cognitive stress.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Entry document identifier.",
+          "maxLength": 128
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "Parent reflection session identifier.",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user.",
+          "maxLength": 128
+        },
+        "thought": {
+          "type": "string",
+          "description": "User's written journal thought.",
+          "maxLength": 10000
+        },
+        "replyText": {
+          "type": "string",
+          "description": "AI generated empathetic reply text.",
+          "maxLength": 10000
+        },
+        "primaryEmotion": {
+          "type": "string",
+          "description": "Single-word emotional sentiment.",
+          "maxLength": 50
+        },
+        "stressScore": {
+          "type": "number",
+          "description": "Stress score from 1 to 10."
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp string when the entry was created."
+        }
+      },
+      "required": ["userId", "primaryEmotion", "stressScore"]
+    },
+    "userProfile": {
+      "title": "UserProfile",
+      "description": "User profile metadata.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Unique user ID.",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "description": "Email address of the user.",
+          "maxLength": 255
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the user.",
+          "maxLength": 150
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp string of last activity."
+        }
+      },
+      "required": ["uid"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "userProfile",
+      "description": "Private user profile document."
+    },
+    "/users/{userId}/reflections/{reflectionId}": {
+      "schema": "reflection",
+      "description": "User's reflection sessions with conversation turns and sentiment analysis."
+    },
+    "/users/{userId}/journal_entries/{entryId}": {
+      "schema": "journalEntry",
+      "description": "Individual sentiment-analyzed journal entries for mood tracking."
+    }
+  }
+}
