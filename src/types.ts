@@ -75,7 +75,8 @@ export type ReflectionCategory =
   | 'Daily Retrospective'
   | 'Brainstorming & Ideas'
   | 'Gratitude & Mindset'
-  | 'Problem Solving';
+  | 'Problem Solving'
+  | 'Future Self Letter';
 
 export type ReflectionMood =
   | 'Peaceful'
@@ -90,9 +91,12 @@ export interface JournalTurn {
   role: 'user' | 'model';
   text: string;
   timestamp: string;
-  mode?: 'chat' | 'brainstorm' | 'summary' | 'reflection';
+  mode?: 'chat' | 'brainstorm' | 'summary' | 'reflection' | 'future-self';
   primaryEmotion?: string;
   stressScore?: number;
+  isFutureSelf?: boolean;
+  letterFrom2031?: string;
+  rawThought?: string;
 }
 
 export interface ReflectionSummary {
@@ -120,6 +124,23 @@ export interface ReflectionSession {
   modelUsed: string;
   createdAt: string;
   updatedAt: string;
+  isFutureSelf?: boolean;
+  letterFrom2031?: string;
+  rawThought?: string;
+}
+
+export interface FutureLetter {
+  id: string;
+  userId: string;
+  rawThought: string;
+  letterText: string;
+  primaryEmotion: string;
+  stressScore: number;
+  createdAt: string;
+  yearSentFrom?: string;
+  sessionId?: string;
+  modelUsed?: string;
+  title?: string;
 }
 
 export interface MoodOverviewData {

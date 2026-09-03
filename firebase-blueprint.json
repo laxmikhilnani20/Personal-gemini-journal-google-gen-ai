@@ -158,6 +158,21 @@
         "modelUsed": { "type": "string" }
       },
       "required": ["id", "userId", "generatedAt", "topWins", "coreStressors", "actionableAdvice"]
+    },
+    "futureLetter": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "rawThought": { "type": "string" },
+        "letterText": { "type": "string" },
+        "primaryEmotion": { "type": "string" },
+        "stressScore": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "yearSentFrom": { "type": "string" },
+        "sessionId": { "type": "string" }
+      },
+      "required": ["id", "userId", "rawThought", "letterText"]
     }
   },
   "firestore": {
@@ -176,6 +191,10 @@
     "/users/{userId}/weekly_reports/{reportId}": {
       "schema": "weeklyReport",
       "description": "Weekly synthesized patterns with top wins, core stressors, and actionable advice."
+    },
+    "/users/{userId}/future_letters/{letterId}": {
+      "schema": "futureLetter",
+      "description": "Personal letters from the user's Future Self in 2031."
     }
   }
 }

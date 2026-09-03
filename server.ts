@@ -874,6 +874,9 @@ interface SaveEntryParams {
   mood: string;
   title: string;
   userAuthHeader?: string;
+  isFutureSelf?: boolean;
+  letterFrom2031?: string;
+  yearSentFrom?: string;
 }
 
 interface SaveReflectionParams {
@@ -887,6 +890,22 @@ interface SaveReflectionParams {
   stressScore: number;
   userAuthHeader?: string;
   modelUsed?: string;
+  isFutureSelf?: boolean;
+  letterFrom2031?: string;
+  rawThought?: string;
+}
+
+interface SaveFutureLetterParams {
+  userId: string;
+  letterId: string;
+  sessionId?: string;
+  rawThought: string;
+  letterText: string;
+  primaryEmotion: string;
+  stressScore: number;
+  yearSentFrom?: string;
+  title?: string;
+  userAuthHeader?: string;
 }
 
 /**
@@ -939,6 +958,9 @@ async function saveReflectionToFirestore(
         stressScore: { integerValue: String(typeof cleaned.stressScore === 'number' ? Math.round(cleaned.stressScore) : 4) },
         modelUsed: { stringValue: cleaned.modelUsed || 'gemini-3.6-flash' },
         updatedAt: { stringValue: timestamp },
+        ...(cleaned.isFutureSelf ? { isFutureSelf: { booleanValue: true } } : {}),
+        ...(cleaned.letterFrom2031 ? { letterFrom2031: { stringValue: cleaned.letterFrom2031 } } : {}),
+        ...(cleaned.rawThought ? { rawThought: { stringValue: cleaned.rawThought } } : {}),
       },
     };
 
@@ -999,6 +1021,9 @@ async function saveJournalEntryToFirestore(
         title: { stringValue: cleaned.title },
         createdAt: { stringValue: timestamp },
         updatedAt: { stringValue: timestamp },
+        ...(cleaned.isFutureSelf ? { isFutureSelf: { booleanValue: true } } : {}),
+        ...(cleaned.letterFrom2031 ? { letterFrom2031: { stringValue: cleaned.letterFrom2031 } } : {}),
+        ...(cleaned.yearSentFrom ? { yearSentFrom: { stringValue: cleaned.yearSentFrom } } : {}),
       },
     };
 
@@ -1033,6 +1058,64 @@ async function saveJournalEntryToFirestore(
   }
 }
 
+// Persist user's Future Self letter to Cloud Firestore under users/{userId}/future_letters
+async function saveFutureLetterToFirestore(
+  params: SaveFutureLetterParams
+): Promise<{ success: boolean; firestoreId?: string; warning?: string }> {
+  const timestamp = new Date().toISOString();
+  try {
+    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+
+    const cleaned = stripUndefinedBackend(params);
+    const lettersUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(cleaned.userId)}/future_letters`;
+
+    const firestoreDoc = {
+      fields: {
+        id: { stringValue: cleaned.letterId },
+        userId: { stringValue: cleaned.userId },
+        rawThought: { stringValue: cleaned.rawThought },
+        letterText: { stringValue: cleaned.letterText },
+        primaryEmotion: { stringValue: cleaned.primaryEmotion },
+        stressScore: { integerValue: String(cleaned.stressScore) },
+        yearSentFrom: { stringValue: cleaned.yearSentFrom || '2031' },
+        createdAt: { stringValue: timestamp },
+        title: { stringValue: cleaned.title || 'Letter from 2031' },
+        ...(cleaned.sessionId ? { sessionId: { stringValue: cleaned.sessionId } } : {}),
+      },
+    };
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (cleaned.userAuthHeader) {
+      headers['Authorization'] = cleaned.userAuthHeader.startsWith('Bearer ')
+        ? cleaned.userAuthHeader
+        : `Bearer ${cleaned.userAuthHeader}`;
+    }
+
+    const res = await fetch(lettersUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(firestoreDoc),
+    });
+
+    if (res.ok) {
+      const docData = await res.json();
+      console.log(`[Firestore Backend Persistence] Successfully saved future letter to users/${cleaned.userId}/future_letters`);
+      return { success: true, firestoreId: docData.name };
+    } else {
+      const errText = await res.text().catch(() => '');
+      console.warn(`[Firestore Backend Persistence] Note: Firestore future_letters returned HTTP ${res.status}: ${errText.substring(0, 160)}`);
+      return { success: false, warning: `Firestore returned HTTP ${res.status}` };
+    }
+  } catch (err: any) {
+    console.warn('[Firestore Backend Persistence] Exception in saveFutureLetterToFirestore:', err?.message || err);
+    return { success: false, warning: err?.message || 'Firestore connection deferred' };
+  }
+}
+
 // Unified Journal Entry Handler (Prompts Gemini for replyText, single-word primaryEmotion, and 1-10 stressScore)
 async function handleJournalEntry(req: Request, res: Response): Promise<void> {
   try {
@@ -1043,13 +1126,54 @@ async function handleJournalEntry(req: Request, res: Response): Promise<void> {
     const mood = String(body.mood || 'Calm').trim();
     const sessionTitle = String(body.title || 'Journal Reflection').trim();
     const sessionId = String(body.sessionId || `ref-${Date.now()}`).trim();
+    const isFutureSelf = Boolean(
+      body.isFutureSelf === true ||
+      body.futureSelf === true ||
+      body.isFutureLetter === true ||
+      body.mode === 'future-self'
+    );
 
     if (!currentThought && messages.length === 0) {
       res.status(400).json({ error: 'No prompt or reflection text provided' });
       return;
     }
 
-    const systemInstruction = `You are a mindful, insightful, and compassionate AI Journal & Reflection Partner and Emotional Sentiment Analyst.
+    let systemInstruction = '';
+    if (isFutureSelf) {
+      systemInstruction = `You are the user's Future Self, writing back to them as a deeply personal, intimate letter from exactly 5 years in the future: September 2031.
+The current date is September 2026. You remember vividly what it felt like to be sitting right where they are now—the exact weight on their chest, the acute anxieties, the uncertainties, the secret hopes, or the fatigue they are expressing in their raw journal entry.
+
+PERSONA DIRECTIVES ("Future Self Persona"):
+1. VOICE & IDENTITY:
+   - You are NOT a generic AI, clinical therapist, or detached motivational coach. You ARE them, five years older in 2031, having lived through the exact storms, choices, and shifts that lie ahead.
+   - Speak in the first person with deep tenderness, earned peace, gentle humor, and boundless gratitude ("I remember when we wrote this in 2026...", "Looking back across these five years to 2031...", "You were so afraid that X would fall apart, but let me tell you what actually happened...").
+2. SUBSTANCE & TEMPORAL PERSPECTIVE:
+   - Ground your letter directly in their exact raw reflection text: address their specific worries, projects, dilemmas, relationships, or questions.
+   - Provide reassuring long-range temporal perspective: explain how the acute pressure they feel today turns into pivotal growth and self-discovery.
+   - Remind them of what actually matters in the long run (giving oneself permission to rest, staying kind, taking small daily steps) versus what felt overwhelmingly catastrophic in 2026.
+3. FORMAT AS A TIMELESS, BEAUTIFUL LETTER:
+   - Open with an affectionate greeting (e.g. "Dear 2026 Self,", "Hey, from five years down the road,", etc.).
+   - Write 3-4 rich, evocative paragraphs with natural letter cadence and comforting pacing.
+   - Close with a touching sign-off from 2031 (e.g. "With all my love, patience, and gratitude,\\nYour Self in 2031").
+
+CRITICAL JSON OUTPUT REQUIREMENT:
+You MUST return your response as a valid JSON object strictly matching this schema:
+{
+  "letterFrom2031": "The complete, beautifully written letter including greeting, paragraphs, and sign-off.",
+  "replyText": "Same content as letterFrom2031.",
+  "primaryEmotion": "A single word summarizing the core emotional breakthrough or tone (e.g. Reassured, Grounded, Hopeful, Serene, Nostalgic, Resilient)",
+  "stressScore": 2
+}
+
+Guidelines for JSON fields:
+1. "letterFrom2031": string. The heartfelt letter from 2031.
+2. "replyText": string. Identical to letterFrom2031.
+3. "primaryEmotion": string. EXACTLY ONE SINGLE WORD.
+4. "stressScore": number. An integer between 1 and 10 indicating perceived emotional resolution (typically 1-3 reflecting grounded calm).
+
+Output ONLY the JSON object. No markdown code fences, no preamble, no text outside the JSON.`;
+    } else {
+      systemInstruction = `You are a mindful, insightful, and compassionate AI Journal & Reflection Partner and Emotional Sentiment Analyst.
 Your role:
 - Deeply understand the user's thoughts, feelings, ambitions, and daily experiences with warmth and nuanced perception.
 - Validate their experience and formulate an empathetic, constructive response that highlights personal insights and poses 1-2 thoughtful, open-ended questions to deepen self-awareness.
@@ -1077,34 +1201,47 @@ User's declared initial mood: ${mood}
 Session title: "${sessionTitle}"
 
 Output ONLY the JSON object. No preamble, no commentary before or after.`;
+    }
 
     // Construct multi-turn context
     let formattedPrompt = '';
-    if (messages.length > 0) {
-      formattedPrompt += 'Prior Conversation Context in this Reflection Session:\n';
-      messages.forEach((msg: any) => {
-        const speaker = msg.role === 'user' ? 'Journaler' : 'Gemini Companion';
-        formattedPrompt += `[${speaker}]: ${msg.text}\n\n`;
-      });
-    }
+    if (isFutureSelf) {
+      if (messages.length > 0) {
+        formattedPrompt += 'Context of Prior Journal Entries and Reflections in this session:\n';
+        messages.forEach((msg: any) => {
+          const speaker = msg.role === 'user' ? 'Journaler' : 'Companion';
+          formattedPrompt += `[${speaker}]: ${msg.text}\n\n`;
+        });
+      }
+      formattedPrompt += `[Journaler's Raw Message to their Future Self in 2031]:\n${currentThought}\n\nPlease read my raw thoughts carefully and respond strictly as my Future Self writing back to me from the year 2031 according to the Future Self Persona. Return strictly the requested JSON format.`;
+    } else {
+      if (messages.length > 0) {
+        formattedPrompt += 'Prior Conversation Context in this Reflection Session:\n';
+        messages.forEach((msg: any) => {
+          const speaker = msg.role === 'user' ? 'Journaler' : 'Gemini Companion';
+          formattedPrompt += `[${speaker}]: ${msg.text}\n\n`;
+        });
+      }
 
-    if (currentThought) {
-      formattedPrompt += `[Journaler's New Reflection Entry]:\n${currentThought}\n\nPlease analyze the emotional sentiment, determine the single-word primaryEmotion and 1-10 stressScore, and formulate your replyText conforming strictly to the requested JSON format.`;
+      if (currentThought) {
+        formattedPrompt += `[Journaler's New Reflection Entry]:\n${currentThought}\n\nPlease analyze the emotional sentiment, determine the single-word primaryEmotion and 1-10 stressScore, and formulate your replyText conforming strictly to the requested JSON format.`;
+      }
     }
 
     const result = await generateContentWithFallback(formattedPrompt, systemInstruction);
 
     // Parse structured JSON response from Gemini
     let replyText = '';
-    let primaryEmotion = 'Reflective';
-    let stressScore = 4;
+    let primaryEmotion = isFutureSelf ? 'Reassured' : 'Reflective';
+    let stressScore = isFutureSelf ? 2 : 4;
 
     try {
       const cleanJson = result.text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       const parsed = JSON.parse(cleanJson);
       if (parsed && typeof parsed === 'object') {
-        if (typeof parsed.replyText === 'string' && parsed.replyText.trim()) {
-          replyText = parsed.replyText.trim();
+        const textCandidate = parsed.letterFrom2031 || parsed.replyText;
+        if (typeof textCandidate === 'string' && textCandidate.trim()) {
+          replyText = textCandidate.trim();
         }
         if (typeof parsed.primaryEmotion === 'string' && parsed.primaryEmotion.trim()) {
           const words = parsed.primaryEmotion.trim().split(/\s+/);
@@ -1121,11 +1258,14 @@ Output ONLY the JSON object. No preamble, no commentary before or after.`;
       }
     } catch (parseErr) {
       console.warn('[Journal Entry] Fallback regex parsing for Gemini JSON response:', parseErr);
+      const letterMatch = result.text.match(/"letterFrom2031"\s*:\s*"([\s\S]*?)(?<!\\)"/);
       const replyMatch = result.text.match(/"replyText"\s*:\s*"([\s\S]*?)(?<!\\)"/);
       const emotionMatch = result.text.match(/"primaryEmotion"\s*:\s*"([^"]+)"/);
       const stressMatch = result.text.match(/"stressScore"\s*:\s*(\d+)/);
 
-      if (replyMatch && replyMatch[1]) {
+      if (letterMatch && letterMatch[1]) {
+        replyText = letterMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+      } else if (replyMatch && replyMatch[1]) {
         replyText = replyMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
       } else {
         replyText = result.text || 'Thank you for expressing this reflection. Pausing to examine thoughts brings immense clarity.';
@@ -1135,7 +1275,7 @@ Output ONLY the JSON object. No preamble, no commentary before or after.`;
         primaryEmotion = emotionMatch[1].trim().split(/\s+/)[0];
         primaryEmotion = primaryEmotion.charAt(0).toUpperCase() + primaryEmotion.slice(1).toLowerCase();
       } else {
-        primaryEmotion = mood || 'Reflective';
+        primaryEmotion = mood || (isFutureSelf ? 'Reassured' : 'Reflective');
       }
 
       if (stressMatch && stressMatch[1]) {
@@ -1144,7 +1284,9 @@ Output ONLY the JSON object. No preamble, no commentary before or after.`;
     }
 
     if (!replyText) {
-      replyText = result.text || 'Thank you for sharing that reflection. What feeling stands out most as you sit with that thought?';
+      replyText = result.text || (isFutureSelf
+        ? 'Dear 2026 Self,\n\nI hear everything you just shared. From here in 2031, I want you to know: you will get through this, and it shapes you into someone stronger, softer, and deeply grounded. Keep breathing.\n\nWith love,\nYour Self in 2031'
+        : 'Thank you for sharing that reflection. What feeling stands out most as you sit with that thought?');
     }
 
     // Save structured entry data and update reflection document in Cloud Firestore
@@ -1153,42 +1295,71 @@ Output ONLY the JSON object. No preamble, no commentary before or after.`;
     const targetUserId = verifiedUser?.uid || String(body.userId || 'demo-user-7842');
     const userAuthHeader = (req.headers.authorization || (req.headers as any)['Authorization']) as string | undefined;
 
-    const [firestoreSaveResult, reflectionSaveResult] = await Promise.all([
+    const resolvedTitle = isFutureSelf && (!body.title || body.title.startsWith('New Reflection') || body.title === 'Journal Reflection')
+      ? (currentThought ? `Letter from 2031: ${currentThought.slice(0, 30)}...` : 'Letter from 2031')
+      : sessionTitle;
+
+    const [firestoreSaveResult, reflectionSaveResult, futureLetterSaveResult] = await Promise.all([
       saveJournalEntryToFirestore({
         userId: targetUserId,
         sessionId,
         entryId,
         replyText,
+        letterFrom2031: isFutureSelf ? replyText : undefined,
+        isFutureSelf,
+        yearSentFrom: isFutureSelf ? '2031' : undefined,
         primaryEmotion,
         stressScore,
         currentThought,
-        category,
+        category: isFutureSelf ? 'Future Self Letter' : category,
         mood,
-        title: sessionTitle,
+        title: resolvedTitle,
         userAuthHeader,
       }),
       saveReflectionToFirestore({
         userId: targetUserId,
         sessionId,
-        title: sessionTitle,
-        category,
+        title: resolvedTitle,
+        category: isFutureSelf ? 'Future Self Letter' : category,
         mood,
         replyText,
+        letterFrom2031: isFutureSelf ? replyText : undefined,
+        isFutureSelf,
+        rawThought: currentThought,
         primaryEmotion,
         stressScore,
         userAuthHeader,
         modelUsed: result.modelUsed,
       }),
+      isFutureSelf
+        ? saveFutureLetterToFirestore({
+            userId: targetUserId,
+            letterId: `letter-${Date.now()}`,
+            sessionId,
+            rawThought: currentThought,
+            letterText: replyText,
+            primaryEmotion,
+            stressScore,
+            yearSentFrom: '2031',
+            userAuthHeader,
+            title: resolvedTitle,
+          })
+        : Promise.resolve({ success: true }),
     ]);
 
     res.json({
       success: true,
       replyText,
       reply: replyText, // backward compatibility
+      letterFrom2031: isFutureSelf ? replyText : undefined,
+      isFutureSelf,
+      yearSentFrom: isFutureSelf ? '2031' : undefined,
+      rawThought: currentThought,
       primaryEmotion,
       stressScore,
       firestorePersisted: firestoreSaveResult.success,
       reflectionPersisted: reflectionSaveResult.success,
+      futureLetterPersisted: isFutureSelf ? futureLetterSaveResult.success : undefined,
       entryId,
       sessionId,
       modelUsed: result.modelUsed,
@@ -1207,6 +1378,65 @@ Output ONLY the JSON object. No preamble, no commentary before or after.`;
 // Multi-turn Journal Conversation & Entry Endpoints
 app.post('/api/journal/chat', handleJournalEntry);
 app.post('/api/journal/entry', handleJournalEntry);
+app.post(['/api/journal/future-letter', '/api/journal/future-self'], (req: Request, res: Response) => {
+  if (req.body && typeof req.body === 'object') {
+    req.body.isFutureSelf = true;
+  }
+  return handleJournalEntry(req, res);
+});
+
+// GET /api/journal/future-letters - Fetch user's saved Future Self letters from Firestore
+app.get(['/api/journal/future-letters', '/api/journal/future-letter'], async (req: Request, res: Response) => {
+  try {
+    const verifiedUser = (req as any).user as VerifiedUser;
+    const userId = verifiedUser?.uid || (typeof req.query.userId === 'string' ? req.query.userId : 'demo-user-7842');
+    const authHeader = (req.headers.authorization || (req.headers as any)['Authorization']) as string | undefined;
+    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+
+    const firestoreHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (authHeader) {
+      firestoreHeaders['Authorization'] = authHeader.startsWith('Bearer ') ? authHeader : `Bearer ${authHeader}`;
+    }
+
+    const lettersUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(userId)}/future_letters?pageSize=30`;
+    const firestoreRes = await fetch(lettersUrl, { headers: firestoreHeaders });
+
+    const lettersList: any[] = [];
+    if (firestoreRes.ok) {
+      const data = await firestoreRes.json().catch(() => null);
+      if (data && Array.isArray(data.documents)) {
+        for (const doc of data.documents) {
+          const fields = parseFirestoreFields(doc.fields || {});
+          const docId = doc.name ? doc.name.split('/').pop() : `letter-${Math.random()}`;
+          lettersList.push({
+            id: fields.id || docId,
+            userId,
+            rawThought: fields.rawThought || '',
+            letterText: fields.letterText || '',
+            primaryEmotion: fields.primaryEmotion || 'Reassured',
+            stressScore: typeof fields.stressScore === 'number' ? fields.stressScore : 2,
+            yearSentFrom: fields.yearSentFrom || '2031',
+            createdAt: fields.createdAt || doc.createTime || new Date().toISOString(),
+            title: fields.title || 'Letter from 2031',
+            sessionId: fields.sessionId || '',
+          });
+        }
+      }
+    }
+
+    lettersList.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    res.json({
+      success: true,
+      letters: lettersList,
+      count: lettersList.length,
+    });
+  } catch (err: any) {
+    console.error('Error fetching future letters:', err);
+    res.status(500).json({ error: 'Failed to fetch future letters', details: err?.message || 'Server error' });
+  }
+});
 
 // Direct Reflection Persistence Endpoint (Enforces Strict Undefined-Stripping & excludes old summary)
 app.post('/api/journal/reflection', async (req: Request, res: Response) => {

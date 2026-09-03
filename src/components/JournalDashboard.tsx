@@ -27,6 +27,8 @@ import {
   ArrowLeft,
   Filter,
   MessageSquare,
+  Clock,
+  Mail,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import {
@@ -57,6 +59,7 @@ import {
 import { MoodOverview } from './MoodOverview';
 import { ChatWithPastView } from './ChatWithPastView';
 import { WeeklyReportView } from './WeeklyReportView';
+import { LetterFrom2031Card } from './LetterFrom2031Card';
 
 interface JournalDashboardProps {
   user: {
@@ -94,6 +97,14 @@ const PROMPT_STARTERS = [
   'Where did I feel friction or resistance today, and what is it teaching me?',
 ];
 
+const FUTURE_SELF_PROMPT_STARTERS = [
+  'I am anxious about this current crossroad with... Looking back from 2031, what perspective did I lack?',
+  'Tell me: did the exhaustion and stress of this present season actually lead somewhere good?',
+  'What quiet habit or daily boundary should I cultivate today that our future self will thank us for?',
+  'I feel doubtful about whether my current efforts matter. Give me honest reassurance.',
+  'Describe a calm morning in 2031—what does life feel like once this storm passes?',
+];
+
 export const JournalDashboard: React.FC<JournalDashboardProps> = ({
   user,
   onSignOut,
@@ -114,6 +125,9 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
   const [mood, setMood] = useState<ReflectionMood>('Peaceful');
   const [turns, setTurns] = useState<JournalTurn[]>([]);
   const [summary, setSummary] = useState<ReflectionSummary | null>(null);
+
+  // Future Self Feature State (Letter from 2031)
+  const [isFutureSelfMode, setIsFutureSelfMode] = useState<boolean>(false);
 
   // Input & Generation State
   const [userInput, setUserInput] = useState<string>('');
@@ -378,8 +392,16 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
     const latestReplyText =
       updatedTurns.slice().reverse().find((t) => t.role === 'model')?.text || '';
 
+    const isFutureSelfTurn = isFutureSelfMode || updatedTurns.some((t) => t.isFutureSelf);
+    const letterFrom2031 =
+      updatedTurns.slice().reverse().find((t) => t.letterFrom2031)?.letterFrom2031 ||
+      (isFutureSelfTurn ? latestReplyText : undefined);
+    const rawThought =
+      updatedTurns.find((t) => t.role === 'user' && (t.rawThought || t.isFutureSelf))?.text ||
+      updatedTurns.find((t) => t.role === 'user')?.text ||
+      '';
+
     // Build reflection session payload:
-    // Old summary field is removed; new replyText, primaryEmotion, and stressScore are properly saved.
     // Strict Undefined-Stripping rule is applied to ensure no undefined property ever reaches Firestore.
     const rawSessionData: Record<string, any> = {
       id: currentSessionId,
@@ -387,12 +409,16 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
       userEmail: user.email || null,
       userName: user.displayName || null,
       title: overrideTitle || title,
-      category,
+      category: isFutureSelfTurn ? 'Future Self Letter' : category,
       mood,
       turns: updatedTurns,
       replyText: latestReplyText,
-      primaryEmotion: derivedEmotion || 'Reflective',
-      stressScore: derivedStress ?? 4,
+      letterFrom2031: letterFrom2031 || null,
+      isFutureSelf: isFutureSelfTurn || false,
+      rawThought: rawThought || null,
+      yearSentFrom: isFutureSelfTurn ? '2031' : null,
+      primaryEmotion: derivedEmotion || (isFutureSelfTurn ? 'Reassured' : 'Reflective'),
+      stressScore: derivedStress ?? (isFutureSelfTurn ? 2 : 4),
       modelUsed: 'gemini-3.6-flash',
       createdAt: turns.length > 0 ? (turns[0].timestamp) : new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -423,6 +449,27 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
     try {
       const sessionDocRef = doc(db, 'users', user.uid, 'reflections', currentSessionId);
       await setDoc(sessionDocRef, sessionData, { merge: true });
+
+      // If this is a Future Self Letter, also persist to future_letters collection for dedicated querying
+      if (isFutureSelfTurn && letterFrom2031) {
+        try {
+          const futureLettersCol = collection(db, 'users', user.uid, 'future_letters');
+          await addDoc(futureLettersCol, stripUndefined({
+            id: `letter-${Date.now()}`,
+            userId: user.uid,
+            rawThought: rawThought || '',
+            letterText: letterFrom2031,
+            primaryEmotion: derivedEmotion || 'Reassured',
+            stressScore: derivedStress ?? 2,
+            yearSentFrom: '2031',
+            createdAt: new Date().toISOString(),
+            sessionId: currentSessionId,
+            title: overrideTitle || title,
+          }));
+        } catch (futErr) {
+          console.warn('Note: Local future_letters addDoc deferred (handled by backend):', futErr);
+        }
+      }
 
       // Save structured entry record to users/{userId}/journal_entries
       if (overrideEmotion || overrideStress !== undefined) {
@@ -458,6 +505,7 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
     setTurns([]);
     setSummary(null);
     setUserInput('');
+    setIsFutureSelfMode(false);
     setActionItemChecked({});
     setActiveTab('studio');
   };
@@ -471,6 +519,7 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
     setTurns(sess.turns || []);
     setSummary(sess.summary || null);
     setUserInput('');
+    setIsFutureSelfMode(Boolean(sess.isFutureSelf || sess.category === 'Future Self Letter' || sess.turns?.some((t) => t.isFutureSelf)));
     setActionItemChecked({});
     setActiveTab('studio');
   };
@@ -522,7 +571,9 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
       role: 'user',
       text: promptToSend,
       timestamp: new Date().toISOString(),
-      mode: 'reflection',
+      mode: isFutureSelfMode ? 'future-self' : 'reflection',
+      isFutureSelf: isFutureSelfMode,
+      rawThought: promptToSend,
     };
 
     const nextTurns = [...turns, userTurn];
@@ -533,7 +584,11 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
     // If first turn and title is default, generate a better title
     let newTitle = title;
     if (turns.length === 0 && (title === 'New Reflection Session' || title === 'Evening Clarity Reflection')) {
-      newTitle = promptToSend.slice(0, 38) + (promptToSend.length > 38 ? '...' : '');
+      if (isFutureSelfMode) {
+        newTitle = `Letter to 2031: ${promptToSend.slice(0, 32)}${promptToSend.length > 32 ? '...' : ''}`;
+      } else {
+        newTitle = promptToSend.slice(0, 38) + (promptToSend.length > 38 ? '...' : '');
+      }
       setTitle(newTitle);
     }
 
@@ -545,11 +600,12 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
         body: JSON.stringify({
           messages: nextTurns.map((t) => ({ role: t.role, text: t.text })),
           currentThought: promptToSend,
-          category,
+          category: isFutureSelfMode ? 'Future Self Letter' : category,
           mood,
           title: newTitle,
           sessionId: currentSessionId,
           userId: user.uid,
+          isFutureSelf: isFutureSelfMode,
         }),
       });
 
@@ -558,27 +614,32 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
       }
 
       const data = await response.json();
-      const replyText =
+      const rawReply =
+        data.letterFrom2031 ||
         data.replyText ||
         data.reply ||
         'Thank you for sharing that reflection. What feeling stands out most as you sit with that thought?';
-      const detectedEmotion = data.primaryEmotion || 'Reflective';
+      const detectedEmotion = data.primaryEmotion || (isFutureSelfMode ? 'Reassured' : 'Reflective');
       const detectedStressScore =
-        typeof data.stressScore === 'number' ? data.stressScore : 4;
+        typeof data.stressScore === 'number' ? data.stressScore : (isFutureSelfMode ? 2 : 4);
 
       // Update state for live UI tracking
       setLatestEmotion(detectedEmotion);
       setLatestStressScore(detectedStressScore);
       setLatestAssessmentTime(new Date().toISOString());
 
+      const isModelFutureSelf = Boolean(isFutureSelfMode || data.isFutureSelf || data.letterFrom2031);
       const modelTurn: JournalTurn = {
         id: `turn-${Date.now() + 1}`,
         role: 'model',
-        text: replyText,
+        text: rawReply,
         timestamp: new Date().toISOString(),
-        mode: 'reflection',
+        mode: isModelFutureSelf ? 'future-self' : 'reflection',
         primaryEmotion: detectedEmotion,
         stressScore: detectedStressScore,
+        isFutureSelf: isModelFutureSelf,
+        letterFrom2031: isModelFutureSelf ? rawReply : undefined,
+        rawThought: promptToSend,
       };
 
       const finalTurns = [...nextTurns, modelTurn];
@@ -594,14 +655,21 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
       );
     } catch (err: any) {
       console.error('Chat generation error:', err);
+      const fallbackText = isFutureSelfMode
+        ? `Dear past self,\n\nI hear the weight in what you are carrying right now. Looking back from here in 2031, I want you to breathe. The doubts and ambiguity that feel so heavy in 2026 are simply the raw clay of the life we are building together.\n\nBe patient and gentle with your pace. Everything you are learning today prepares us for the peace we inhabit now.\n\nWith unending love and gratitude,\nYour 2031 Self`
+        : `Thank you for expressing this reflection. Taking time to put thoughts into words brings immense clarity.\n\n*What is one small, gentle action you could take today that honors this feeling?*`;
+
       const fallbackTurn: JournalTurn = {
         id: `turn-${Date.now() + 1}`,
         role: 'model',
-        text: `Thank you for expressing this reflection. Taking time to put thoughts into words brings immense clarity.\n\n*What is one small, gentle action you could take today that honors this feeling?*`,
+        text: fallbackText,
         timestamp: new Date().toISOString(),
-        mode: 'reflection',
-        primaryEmotion: mood || 'Reflective',
-        stressScore: 4,
+        mode: isFutureSelfMode ? 'future-self' : 'reflection',
+        primaryEmotion: isFutureSelfMode ? 'Reassured' : (mood || 'Reflective'),
+        stressScore: isFutureSelfMode ? 2 : 4,
+        isFutureSelf: isFutureSelfMode,
+        letterFrom2031: isFutureSelfMode ? fallbackText : undefined,
+        rawThought: promptToSend,
       };
       const finalTurns = [...nextTurns, fallbackTurn];
       setTurns(finalTurns);
@@ -609,8 +677,8 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
         finalTurns,
         summary,
         newTitle,
-        mood || 'Reflective',
-        4
+        isFutureSelfMode ? 'Reassured' : (mood || 'Reflective'),
+        isFutureSelfMode ? 2 : 4
       );
     } finally {
       setSubmitting(false);
@@ -1038,18 +1106,35 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
             </div>
 
             {/* Prompt Inspirations */}
-            <div className="bg-[#0F1115] border border-slate-800 rounded-2xl p-4 shadow-xs space-y-2.5">
-              <h4 className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Reflection Spark Prompts</span>
-              </h4>
+            <div className={`border rounded-2xl p-4 shadow-xs space-y-2.5 transition-all ${
+              isFutureSelfMode ? 'bg-[#120f26] border-amber-500/30' : 'bg-[#0F1115] border-slate-800'
+            }`}>
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold flex items-center gap-1.5">
+                  {isFutureSelfMode ? (
+                    <>
+                      <Clock className="w-3.5 h-3.5 text-amber-400" />
+                      <span className="text-amber-200">Prompts for Your 2031 Self</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-slate-300">Reflection Spark Prompts</span>
+                    </>
+                  )}
+                </h4>
+              </div>
               <div className="space-y-1.5">
-                {PROMPT_STARTERS.map((promptText, idx) => (
+                {(isFutureSelfMode ? FUTURE_SELF_PROMPT_STARTERS : PROMPT_STARTERS).map((promptText, idx) => (
                   <button
                     key={idx}
                     onClick={() => handleSendTurn(promptText)}
                     disabled={submitting}
-                    className="w-full text-left p-2 rounded-lg bg-[#0A0A0B] hover:bg-slate-800/80 border border-slate-800/80 text-[11px] text-slate-400 hover:text-emerald-300 transition-colors leading-relaxed"
+                    className={`w-full text-left p-2 rounded-lg border text-[11px] transition-colors leading-relaxed ${
+                      isFutureSelfMode
+                        ? 'bg-[#181432] hover:bg-amber-950/40 border-amber-500/20 text-slate-300 hover:text-amber-200'
+                        : 'bg-[#0A0A0B] hover:bg-slate-800/80 border-slate-800/80 text-slate-400 hover:text-emerald-300'
+                    }`}
                   >
                     "{promptText}"
                   </button>
@@ -1059,13 +1144,23 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
           </div>
 
           {/* Right Main Area: Multi-turn Conversation Stream */}
-          <div className="lg:col-span-3 flex flex-col bg-[#0F1115] border border-slate-800 rounded-2xl shadow-lg h-[640px] overflow-hidden">
+          <div className={`lg:col-span-3 flex flex-col border rounded-2xl shadow-lg h-[640px] overflow-hidden transition-all duration-300 ${
+            isFutureSelfMode
+              ? 'bg-[#0d0b1a] border-amber-500/35 shadow-[0_4px_30px_rgba(217,119,6,0.08)]'
+              : 'bg-[#0F1115] border-slate-800'
+          }`}>
             {/* Conversation Header */}
-            <div className="px-5 py-3.5 border-b border-slate-800 bg-[#0A0A0B] flex items-center justify-between">
+            <div className={`px-5 py-3.5 border-b flex items-center justify-between transition-colors ${
+              isFutureSelfMode ? 'border-amber-500/20 bg-[#120f22]' : 'border-slate-800 bg-[#0A0A0B]'
+            }`}>
               <div className="flex items-center gap-2">
                 <span className="font-bold text-white text-xs">{title}</span>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
-                  {category}
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                  isFutureSelfMode
+                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                    : 'bg-slate-800 text-slate-300 border-slate-700'
+                }`}>
+                  {isFutureSelfMode ? 'Letter from 2031' : category}
                 </span>
                 <span className="px-2 py-0.5 rounded-full text-[10px] bg-slate-800 text-slate-300 border border-slate-700">
                   {MOODS.find((m) => m.label === mood)?.emoji} {mood}
@@ -1073,7 +1168,14 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
               </div>
 
               <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
-                <span>Model: <strong className="text-emerald-400">gemini-3.6-flash</strong></span>
+                {isFutureSelfMode ? (
+                  <span className="text-amber-300 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-amber-400" />
+                    <strong>Persona: Future Self (2031)</strong>
+                  </span>
+                ) : (
+                  <span>Model: <strong className="text-emerald-400">gemini-3.6-flash</strong></span>
+                )}
               </div>
             </div>
 
@@ -1081,20 +1183,52 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
             <div className="flex-1 p-5 overflow-y-auto space-y-4">
               {turns.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-3">
-                  <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                    <Sparkles className="w-6 h-6" />
+                  <div className={`w-12 h-12 rounded-2xl border flex items-center justify-center ${
+                    isFutureSelfMode
+                      ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                      : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                  }`}>
+                    {isFutureSelfMode ? <Mail className="w-6 h-6" /> : <Sparkles className="w-6 h-6" />}
                   </div>
-                  <h3 className="text-sm font-bold text-white">Begin Your Multi-Turn Reflection</h3>
+                  <h3 className="text-sm font-bold text-white">
+                    {isFutureSelfMode ? 'Write to Your Future Self (Year 2031)' : 'Begin Your Multi-Turn Reflection'}
+                  </h3>
                   <p className="text-xs text-slate-400 max-w-md leading-relaxed">
-                    Write your thoughts, daily learnings, dilemmas, or ideas below. Gemini 3.6 Flash will reflect back, offer insightful inquiries, and help you unlock new perspectives.
+                    {isFutureSelfMode
+                      ? 'What questions, struggles, or quiet hopes are you carrying today in 2026? Send them forward across time. Your future self will respond with the wisdom of hindsight and lived clarity.'
+                      : 'Write your thoughts, daily learnings, dilemmas, or ideas below. Gemini 3.6 Flash will reflect back, offer insightful inquiries, and help you unlock new perspectives.'}
                   </p>
                   <p className="text-[11px] font-mono text-slate-500">
-                    🔒 All turns are saved to Firestore exclusively under your user ID: <code className="text-emerald-400">users/{user.uid.slice(0, 8)}...</code>
+                    🔒 All entries are saved to Firestore under: <code className={isFutureSelfMode ? 'text-amber-400' : 'text-emerald-400'}>users/{user.uid.slice(0, 8)}...</code>
                   </p>
                 </div>
               ) : (
                 turns.map((turn, index) => {
                   const isUser = turn.role === 'user';
+                  const isFutureSelfTurn = Boolean(
+                    turn.isFutureSelf ||
+                    turn.mode === 'future-self' ||
+                    turn.letterFrom2031 ||
+                    isFutureSelfMode
+                  );
+
+                  // Render Model turn as a beautiful physical letter from 2031 when it's a Future Self letter
+                  if (!isUser && isFutureSelfTurn) {
+                    return (
+                      <div key={turn.id || index} className="w-full">
+                        <LetterFrom2031Card
+                          letterText={turn.letterFrom2031 || turn.text}
+                          rawThought={turn.rawThought}
+                          timestamp={turn.timestamp}
+                          primaryEmotion={turn.primaryEmotion}
+                          stressScore={turn.stressScore}
+                          yearSentFrom="2031"
+                          title={title}
+                        />
+                      </div>
+                    );
+                  }
+
                   return (
                     <div
                       key={turn.id || index}
@@ -1109,13 +1243,26 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                       <div
                         className={`max-w-[85%] rounded-2xl p-4 text-xs leading-relaxed space-y-2 shadow-xs ${
                           isUser
-                            ? 'bg-slate-800 text-slate-100 border border-slate-700'
+                            ? isFutureSelfTurn
+                              ? 'bg-gradient-to-br from-[#1d1933] to-[#120f24] text-amber-100 border border-amber-500/35'
+                              : 'bg-slate-800 text-slate-100 border border-slate-700'
                             : 'bg-[#0A0A0B] text-slate-200 border border-slate-800'
                         }`}
                       >
                         <div className="flex items-center justify-between gap-4 text-[10px] text-slate-400 border-b border-slate-800/80 pb-1.5 font-mono">
-                          <span className="font-semibold text-slate-300">
-                            {isUser ? 'You' : 'Gemini 3.6 Flash'}
+                          <span className={`font-semibold flex items-center gap-1.5 ${isFutureSelfTurn && isUser ? 'text-amber-300' : 'text-slate-300'}`}>
+                            {isUser ? (
+                              isFutureSelfTurn ? (
+                                <>
+                                  <Clock className="w-3 h-3 text-amber-400" />
+                                  <span>To My Future Self (2031)</span>
+                                </>
+                              ) : (
+                                'You'
+                              )
+                            ) : (
+                              'Gemini 3.6 Flash'
+                            )}
                           </span>
                           <div className="flex items-center gap-2">
                             {!isUser && turn.primaryEmotion && (
@@ -1138,7 +1285,11 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                       </div>
 
                       {isUser && (
-                        <div className="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 font-bold text-xs shrink-0 mt-1">
+                        <div className={`w-8 h-8 rounded-lg border flex items-center justify-center font-bold text-xs shrink-0 mt-1 ${
+                          isFutureSelfTurn
+                            ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                            : 'bg-slate-800 border-slate-700 text-slate-300'
+                        }`}>
                           {user.displayName?.charAt(0) || user.email?.charAt(0) || 'U'}
                         </div>
                       )}
@@ -1149,12 +1300,20 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
 
               {submitting && (
                 <div className="flex gap-3 justify-start items-center">
-                  <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 animate-pulse">
-                    <BrainCircuit className="w-4 h-4" />
+                  <div className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 animate-pulse ${
+                    isFutureSelfMode ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                  }`}>
+                    {isFutureSelfMode ? <Mail className="w-4 h-4" /> : <BrainCircuit className="w-4 h-4" />}
                   </div>
-                  <div className="bg-[#0A0A0B] border border-slate-800 rounded-2xl px-4 py-3 text-xs text-slate-400 flex items-center gap-2">
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-                    <span>Gemini 3.6 Flash is reflecting on your entry...</span>
+                  <div className={`border rounded-2xl px-4 py-3 text-xs flex items-center gap-2 ${
+                    isFutureSelfMode ? 'bg-[#141026] border-amber-500/30 text-amber-200' : 'bg-[#0A0A0B] border-slate-800 text-slate-400'
+                  }`}>
+                    <RefreshCw className={`w-3.5 h-3.5 animate-spin ${isFutureSelfMode ? 'text-amber-400' : 'text-emerald-400'}`} />
+                    <span>
+                      {isFutureSelfMode
+                        ? 'Transmitting across 2026 ➔ 2031... Your Future Self is penning a letter...'
+                        : 'Gemini 3.6 Flash is reflecting on your entry...'}
+                    </span>
                   </div>
                 </div>
               )}
@@ -1162,8 +1321,65 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Turn Composer Input Box */}
-            <div className="p-3.5 border-t border-slate-800 bg-[#0A0A0B]">
+            {/* Turn Composer Input Box with Distinct Future Self Mode Toggle & Styling */}
+            <div className={`p-3.5 border-t transition-all duration-300 ${
+              isFutureSelfMode
+                ? 'bg-gradient-to-b from-[#141028] via-[#0d0a1c] to-[#070510] border-amber-500/35 shadow-[0_-8px_25px_rgba(217,119,6,0.12)]'
+                : 'bg-[#0A0A0B] border-slate-800'
+            }`}>
+              {/* Visually Distinct "Write to my Future Self" Toggle Button */}
+              <div className="flex items-center justify-between pb-2.5">
+                <div className="flex items-center gap-2">
+                  <button
+                    id="btn-toggle-future-self"
+                    type="button"
+                    onClick={() => setIsFutureSelfMode(!isFutureSelfMode)}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                      isFutureSelfMode
+                        ? 'bg-gradient-to-r from-amber-500/25 via-purple-600/25 to-indigo-600/30 border border-amber-400/60 text-amber-200 shadow-[0_0_15px_rgba(245,158,11,0.25)]'
+                        : 'bg-[#0F1115] hover:bg-slate-800/80 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    }`}
+                  >
+                    <Clock className={`w-3.5 h-3.5 ${isFutureSelfMode ? 'text-amber-400 animate-pulse' : 'text-slate-500'}`} />
+                    <span>Write to my Future Self</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                      isFutureSelfMode ? 'bg-amber-400/25 text-amber-300 border border-amber-400/40' : 'bg-slate-800 text-slate-500'
+                    }`}>
+                      2031
+                    </span>
+                    {isFutureSelfMode && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+                    )}
+                  </button>
+                </div>
+
+                {isFutureSelfMode && (
+                  <div className="flex items-center gap-1.5 text-[11px] font-mono text-amber-300/80">
+                    <Sparkles className="w-3 h-3 text-amber-400" />
+                    <span>Future Self Mode Active · 2031 Perspective</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Special Mode Guidance Banner */}
+              {isFutureSelfMode && (
+                <div className="mb-2.5 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-xs text-amber-200">
+                  <div className="flex items-center gap-2">
+                    <Mail className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span className="text-[11px] leading-tight">
+                      <strong>Letter from 2031 Mode:</strong> Pour out your current dilemma, fear, or uncertainty. Your future self will respond as a wiser, grounded companion from 5 years ahead.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsFutureSelfMode(false)}
+                    className="text-[10px] text-amber-300/80 hover:text-white underline ml-2 shrink-0 cursor-pointer"
+                  >
+                    Standard Mode
+                  </button>
+                </div>
+              )}
+
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -1182,18 +1398,30 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                         handleSendTurn();
                       }
                     }}
-                    placeholder="Write your journal entry or reflection thought here... (Press Cmd+Enter or click Send)"
-                    rows={3}
-                    className="w-full text-xs p-3 pr-12 bg-[#0F1115] border border-slate-800 rounded-xl text-slate-200 placeholder-slate-500 focus:outline-hidden focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/30 resize-none font-sans"
+                    placeholder={
+                      isFutureSelfMode
+                        ? "Write to yourself in 2031: What is weighing on you today? What decision feels ambiguous or heavy? (Press Cmd+Enter or click Send)"
+                        : "Write your journal entry or reflection thought here... (Press Cmd+Enter or click Send)"
+                    }
+                    rows={isFutureSelfMode ? 4 : 3}
+                    className={`w-full text-xs p-3 pr-12 rounded-xl transition-all resize-none ${
+                      isFutureSelfMode
+                        ? 'bg-[#181330] border border-amber-500/40 text-amber-100 placeholder-amber-200/40 focus:outline-hidden focus:border-amber-400 focus:ring-1 focus:ring-amber-400/40 font-serif text-[13.5px] leading-relaxed'
+                        : 'bg-[#0F1115] border border-slate-800 text-slate-200 placeholder-slate-500 focus:outline-hidden focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/30 font-sans'
+                    }`}
                   />
                   <button
                     id="btn-send-turn"
                     type="submit"
                     disabled={!userInput.trim() || submitting}
-                    className="absolute bottom-3 right-3 p-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg shadow-sm transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-                    title="Send reflection to Gemini"
+                    className={`absolute bottom-3 right-3 p-2 font-bold rounded-lg shadow-sm transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer ${
+                      isFutureSelfMode
+                        ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-[0_0_12px_rgba(245,158,11,0.4)]'
+                        : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                    }`}
+                    title={isFutureSelfMode ? "Send letter to your 2031 self" : "Send reflection to Gemini"}
                   >
-                    <Send className="w-4 h-4" />
+                    {isFutureSelfMode ? <Mail className="w-4 h-4" /> : <Send className="w-4 h-4" />}
                   </button>
                 </div>
 
@@ -1201,14 +1429,14 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="font-mono">Tip: Cmd+Enter to send</span>
                     <span>•</span>
-                    <span>Continuous multi-turn reflection dialogue</span>
+                    <span>{isFutureSelfMode ? 'Dispatched to your future self' : 'Continuous multi-turn reflection dialogue'}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
                       onClick={handleGenerateSummary}
                       disabled={turns.length === 0}
-                      className="text-xs text-blue-400 hover:text-blue-300 font-semibold flex items-center gap-1 disabled:opacity-40"
+                      className="text-xs text-blue-400 hover:text-blue-300 font-semibold flex items-center gap-1 disabled:opacity-40 cursor-pointer"
                     >
                       <FileText className="w-3 h-3" /> Summarize
                     </button>
@@ -1217,7 +1445,7 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                       type="button"
                       onClick={handleBrainstormIdeas}
                       disabled={turns.length === 0}
-                      className="text-xs text-purple-400 hover:text-purple-300 font-semibold flex items-center gap-1 disabled:opacity-40"
+                      className="text-xs text-purple-400 hover:text-purple-300 font-semibold flex items-center gap-1 disabled:opacity-40 cursor-pointer"
                     >
                       <Lightbulb className="w-3 h-3" /> Brainstorm
                     </button>
@@ -1504,23 +1732,38 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                 const turnCount = sess.turns?.length || 0;
                 const lastTurn = sess.turns && sess.turns.length > 0 ? sess.turns[sess.turns.length - 1].text : '';
                 const isCurrent = sess.id === currentSessionId;
+                const isFutureLetter = Boolean(
+                  sess.isFutureSelf ||
+                  sess.letterFrom2031 ||
+                  sess.category === 'Future Self Letter' ||
+                  sess.turns?.some((t) => t.isFutureSelf || t.letterFrom2031)
+                );
 
                 return (
                   <div
                     key={sess.id}
                     onClick={() => handleSelectPastSession(sess)}
                     className={`p-4 rounded-xl border transition-all cursor-pointer shadow-xs space-y-3 ${
-                      isCurrent
+                      isFutureLetter
+                        ? isCurrent
+                          ? 'bg-[#141026] border-amber-500/60 ring-1 ring-amber-500/30'
+                          : 'bg-[#100d1e] border-amber-500/30 hover:border-amber-400/50 hover:bg-[#141028]'
+                        : isCurrent
                         ? 'bg-[#0A0A0B] border-emerald-500/50 ring-1 ring-emerald-500/20'
                         : 'bg-[#0A0A0B] border-slate-800 hover:border-slate-700 hover:bg-[#0C0E12]'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <div className="flex items-center gap-2">
-                          <h3 className="text-xs font-bold text-white group-hover:text-emerald-400">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className={`text-xs font-bold ${isFutureLetter ? 'text-amber-200' : 'text-white group-hover:text-emerald-400'}`}>
                             {sess.title}
                           </h3>
+                          {isFutureLetter && (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1 font-semibold">
+                              <Mail className="w-2.5 h-2.5" /> 2031 Letter
+                            </span>
+                          )}
                           {isCurrent && (
                             <span className="px-2 py-0.5 rounded-full text-[9px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
                               Active
@@ -1545,15 +1788,19 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                       </button>
                     </div>
 
-                    <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
-                      {sess.replyText || sess.summary?.executiveSummary || lastTurn || 'No text in reflection.'}
+                    <p className={`text-xs line-clamp-2 leading-relaxed ${
+                      isFutureLetter ? 'text-amber-100/80 font-serif' : 'text-slate-400'
+                    }`}>
+                      {sess.letterFrom2031 || sess.replyText || sess.summary?.executiveSummary || lastTurn || 'No text in reflection.'}
                     </p>
 
                     <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 text-[11px] text-slate-500 font-mono">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-slate-400">{sess.category}</span>
+                        <span className={isFutureLetter ? 'text-amber-300' : 'text-slate-400'}>
+                          {isFutureLetter ? 'Future Self Letter' : sess.category}
+                        </span>
                         <span>•</span>
-                        <span className={sess.primaryEmotion ? 'text-emerald-400 font-semibold' : ''}>
+                        <span className={isFutureLetter ? 'text-amber-400 font-semibold' : (sess.primaryEmotion ? 'text-emerald-400 font-semibold' : '')}>
                           {sess.primaryEmotion || sess.mood}
                         </span>
                         {sess.stressScore !== undefined && (
@@ -1565,7 +1812,7 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-emerald-400/90">{turnCount} turns</span>
+                        <span className={isFutureLetter ? 'text-amber-400/90' : 'text-emerald-400/90'}>{turnCount} turns</span>
                         <ChevronRight className="w-3.5 h-3.5 text-slate-600" />
                       </div>
                     </div>

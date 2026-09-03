@@ -32,6 +32,10 @@ service cloud.firestore {
       match /weekly_reports/{reportId} {
         allow read, write: if isOwner(userId);
       }
+
+      match /future_letters/{letterId} {
+        allow read, write: if isOwner(userId);
+      }
     }
   }
 }
