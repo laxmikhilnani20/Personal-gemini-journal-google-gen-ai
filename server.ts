@@ -1631,6 +1631,472 @@ Please answer the user's question based strictly on their past journal entries:`
   }
 });
 
+// ==========================================
+// 5D. WEEKLY PATTERN SYNTHESIZER
+// ==========================================
+
+interface SaveWeeklyReportParams {
+  userId: string;
+  reportId: string;
+  periodStart: string;
+  periodEnd: string;
+  entriesAnalyzed: number;
+  topWins: string[];
+  coreStressors: string[];
+  actionableAdvice: string[];
+  overallSummary?: string;
+  modelUsed?: string;
+  userAuthHeader?: string;
+}
+
+async function saveWeeklyReportToFirestore(params: SaveWeeklyReportParams): Promise<{ success: boolean; firestoreId?: string; warning?: string }> {
+  const timestamp = new Date().toISOString();
+  try {
+    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+    const cleaned = stripUndefinedBackend(params);
+    const reportsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(cleaned.userId)}/weekly_reports?documentId=${encodeURIComponent(cleaned.reportId)}`;
+
+    const firestoreReportDoc = {
+      fields: {
+        id: { stringValue: cleaned.reportId },
+        userId: { stringValue: cleaned.userId },
+        generatedAt: { stringValue: timestamp },
+        periodStart: { stringValue: cleaned.periodStart },
+        periodEnd: { stringValue: cleaned.periodEnd },
+        entriesAnalyzed: { integerValue: String(cleaned.entriesAnalyzed) },
+        topWins: {
+          arrayValue: {
+            values: (cleaned.topWins || []).map((w: string) => ({ stringValue: String(w) })),
+          },
+        },
+        coreStressors: {
+          arrayValue: {
+            values: (cleaned.coreStressors || []).map((s: string) => ({ stringValue: String(s) })),
+          },
+        },
+        actionableAdvice: {
+          arrayValue: {
+            values: (cleaned.actionableAdvice || []).map((a: string) => ({ stringValue: String(a) })),
+          },
+        },
+        overallSummary: { stringValue: String(cleaned.overallSummary || '') },
+        modelUsed: { stringValue: String(cleaned.modelUsed || 'gemini-3.8-flash') },
+        createdAt: { stringValue: timestamp },
+      },
+    };
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (cleaned.userAuthHeader) {
+      headers['Authorization'] = cleaned.userAuthHeader.startsWith('Bearer ')
+        ? cleaned.userAuthHeader
+        : `Bearer ${cleaned.userAuthHeader}`;
+    }
+
+    const res = await fetch(reportsUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(firestoreReportDoc),
+    });
+
+    if (res.ok) {
+      const docData = await res.json().catch(() => ({}));
+      console.log(`[Firestore Backend Persistence] Successfully saved weekly report to users/${cleaned.userId}/weekly_reports/${cleaned.reportId}`);
+      return { success: true, firestoreId: docData.name };
+    } else {
+      const errText = await res.text().catch(() => '');
+      console.warn(`[Firestore Backend Persistence] Weekly report write returned HTTP ${res.status}: ${errText.substring(0, 160)}`);
+      return { success: false, warning: `Firestore returned HTTP ${res.status}` };
+    }
+  } catch (err: any) {
+    console.warn('[Firestore Backend Persistence] Weekly report save exception caught safely:', err?.message || err);
+    return { success: false, warning: err?.message || 'Firestore connection deferred' };
+  }
+}
+
+// Generate Weekly Report Endpoint:
+// 1. Fetches user's journal entries from last 7 days (text, primaryEmotion, stressScore)
+// 2. Passes batch to Gemini requesting JSON { topWins, coreStressors, actionableAdvice, overallSummary }
+// 3. Saves generated report to Firestore subcollection /users/{userId}/weekly_reports/{reportId}
+app.post(['/api/journal/weekly-report', '/api/journal/weekly-reports'], async (req: Request, res: Response) => {
+  try {
+    const verifiedUser = (req as any).user as VerifiedUser;
+    if (!verifiedUser || !verifiedUser.uid) {
+      res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Firebase token verification required to generate weekly pattern reports.',
+      });
+      return;
+    }
+
+    const userId = verifiedUser.uid;
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const authHeader = (req.headers.authorization || (req.headers as any)['Authorization']) as string | undefined;
+    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+
+    const firestoreHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (authHeader) {
+      firestoreHeaders['Authorization'] = authHeader.startsWith('Bearer ') ? authHeader : `Bearer ${authHeader}`;
+    }
+
+    // Query Firestore for recent user journal entries and reflections
+    const journalEntriesUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(userId)}/journal_entries?pageSize=100`;
+    const reflectionsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(userId)}/reflections?pageSize=100`;
+
+    const allEntries: RetrievedJournalEntry[] = [];
+
+    try {
+      const [journalRes, reflectionsRes] = await Promise.allSettled([
+        fetch(journalEntriesUrl, { headers: firestoreHeaders }),
+        fetch(reflectionsUrl, { headers: firestoreHeaders }),
+      ]);
+
+      if (journalRes.status === 'fulfilled' && journalRes.value.ok) {
+        const jData = await journalRes.value.json().catch(() => null);
+        if (jData && Array.isArray(jData.documents)) {
+          for (const doc of jData.documents) {
+            const fields = parseFirestoreFields(doc.fields || {});
+            const docId = doc.name ? doc.name.split('/').pop() : `entry-${Math.random()}`;
+            const thought = String(fields.thought || '').trim();
+            const replyText = String(fields.replyText || '').trim();
+            const title = String(fields.title || 'Journal Entry').trim();
+            const createdAt = fields.createdAt || doc.createTime || new Date().toISOString();
+
+            if (thought || replyText) {
+              allEntries.push({
+                id: fields.id || docId,
+                title,
+                category: fields.category,
+                thought,
+                replyText,
+                primaryEmotion: fields.primaryEmotion || fields.declaredMood || 'Reflective',
+                stressScore: typeof fields.stressScore === 'number' ? fields.stressScore : 4,
+                createdAt,
+              });
+            }
+          }
+        }
+      }
+
+      if (reflectionsRes.status === 'fulfilled' && reflectionsRes.value.ok) {
+        const rData = await reflectionsRes.value.json().catch(() => null);
+        if (rData && Array.isArray(rData.documents)) {
+          for (const doc of rData.documents) {
+            const fields = parseFirestoreFields(doc.fields || {});
+            const docId = doc.name ? doc.name.split('/').pop() : `ref-${Math.random()}`;
+            const title = String(fields.title || 'Reflection Session').trim();
+            const replyText = String(fields.replyText || '').trim();
+            const createdAt = fields.createdAt || fields.updatedAt || doc.createTime || new Date().toISOString();
+
+            let turnsThought = '';
+            if (Array.isArray(fields.turns)) {
+              turnsThought = fields.turns
+                .map((t: any) => `${t.role === 'user' ? 'User' : 'Companion'}: ${t.text}`)
+                .join('\n');
+            }
+
+            const thought = turnsThought || String(fields.thought || '').trim();
+
+            if (!allEntries.some((e) => e.id === (fields.id || docId))) {
+              allEntries.push({
+                id: fields.id || docId,
+                title,
+                category: fields.category,
+                thought,
+                replyText,
+                primaryEmotion: fields.primaryEmotion || fields.mood || 'Reflective',
+                stressScore: typeof fields.stressScore === 'number' ? fields.stressScore : 4,
+                createdAt,
+              });
+            }
+          }
+        }
+      }
+    } catch (firestoreErr) {
+      console.warn('[Weekly Report] Firestore query warning caught safely:', firestoreErr);
+    }
+
+    // Merge cached entries from client if present (e.g. preview mode or instant optimistic UI)
+    if (Array.isArray(body.cachedEntries) && body.cachedEntries.length > 0) {
+      for (const item of body.cachedEntries) {
+        const id = item.id || `cached-${Math.random()}`;
+        if (!allEntries.some((e) => e.id === id)) {
+          let thought = '';
+          if (Array.isArray(item.turns)) {
+            thought = item.turns.map((t: any) => `${t.role === 'user' ? 'User' : 'Companion'}: ${t.text}`).join('\n');
+          } else {
+            thought = item.thought || item.text || '';
+          }
+          allEntries.push({
+            id,
+            title: item.title || 'Reflection Session',
+            category: item.category,
+            thought,
+            replyText: item.replyText,
+            primaryEmotion: item.primaryEmotion || item.mood || 'Reflective',
+            stressScore: typeof item.stressScore === 'number' ? item.stressScore : 4,
+            createdAt: item.updatedAt || item.createdAt || new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    const now = new Date();
+    const sevenDaysAgoMs = now.getTime() - (7 * 24 * 60 * 60 * 1000);
+
+    // Filter entries from the last 7 days
+    let weeklyEntries = allEntries.filter((entry) => {
+      const entryTime = new Date(entry.createdAt).getTime();
+      return !isNaN(entryTime) && entryTime >= sevenDaysAgoMs;
+    });
+
+    // If 0 entries in the last 7 days, check if the user has recent entries at all (to guarantee immediate demonstrable utility)
+    let isSparseFallback = false;
+    if (weeklyEntries.length === 0 && allEntries.length > 0) {
+      // Sort newest first and take up to 10 most recent entries
+      allEntries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      weeklyEntries = allEntries.slice(0, 10);
+      isSparseFallback = true;
+    }
+
+    // If still completely zero entries
+    if (weeklyEntries.length === 0) {
+      res.status(400).json({
+        error: 'No journal entries found',
+        message: 'No journal entries were found from the last 7 days. Please record at least one reflection entry in the Reflection Studio before generating a weekly pattern report.',
+      });
+      return;
+    }
+
+    // Sort chronologically for pattern synthesis
+    weeklyEntries.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    const periodStart = isSparseFallback && weeklyEntries[0]?.createdAt
+      ? weeklyEntries[0].createdAt
+      : new Date(sevenDaysAgoMs).toISOString();
+    const periodEnd = now.toISOString();
+
+    // Build structured batch text for Gemini
+    let batchContext = `Journal Entries to Analyze (${weeklyEntries.length} total entries from ${periodStart.slice(0, 10)} to ${periodEnd.slice(0, 10)}):\n\n`;
+
+    weeklyEntries.forEach((entry, idx) => {
+      const formattedDate = new Date(entry.createdAt).toLocaleDateString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      batchContext += `[ENTRY #${idx + 1}]\n`;
+      batchContext += `Date: ${formattedDate} (${entry.createdAt})\n`;
+      batchContext += `Title: ${entry.title}\n`;
+      if (entry.category) batchContext += `Category: ${entry.category}\n`;
+      batchContext += `Primary Emotion: ${entry.primaryEmotion}\n`;
+      batchContext += `Stress Score: ${entry.stressScore}/10\n`;
+      batchContext += `User Reflection:\n"${entry.thought || '(No written thought recorded)'}"\n`;
+      if (entry.replyText) batchContext += `Key Guidance:\n"${entry.replyText}"\n`;
+      batchContext += `\n`;
+    });
+
+    const systemInstruction = `You are the Weekly Pattern Synthesizer, an elite cognitive journaling analyst and empathetic psychologist.
+Your mission is to analyze the user's journal entries from the past 7 days (including their written reflections, dialogue, detected primaryEmotion, and stressScore ratings 1-10) to discover emotional rhythms, meaningful wins, core tension sources, and empowering guidance.
+
+CRITICAL JSON OUTPUT SPECIFICATION:
+You MUST return a clean, valid JSON object strictly matching this schema:
+{
+  "topWins": [
+    "Clear, celebrating bullet point highlighting a breakthrough, emotional resilience moment, accomplishment, or positive mindset shift with date/context citation.",
+    "..."
+  ],
+  "coreStressors": [
+    "Objective, empathetic identification of a recurring friction point, cognitive strain source, boundary challenge, or anxiety trigger with context citation.",
+    "..."
+  ],
+  "actionableAdvice": [
+    "Practical, actionable, compassionate recommendation or behavioral adjustment designed specifically for their emotional patterns in the upcoming week.",
+    "..."
+  ],
+  "overallSummary": "A concise 2-3 sentence executive synthesis of their week's emotional trajectory, average stress trends, and growth arc."
+}
+
+GUIDELINES:
+1. Provide 3-5 items for "topWins", 2-4 items for "coreStressors", and 3-5 items for "actionableAdvice".
+2. Ground all insights directly in the text, emotions, and stress metrics from the provided entries.
+3. Keep the tone inspiring, compassionate, honest, and empowering.
+4. Output ONLY the valid JSON object. No backticks, no Markdown formatting wrappers around the JSON.`;
+
+    const userPrompt = `${batchContext}
+
+Please synthesize the weekly patterns and return the JSON object with topWins, coreStressors, and actionableAdvice:`;
+
+    const genResult = await generateContentWithFallback(userPrompt, systemInstruction);
+
+    // Parse JSON
+    let topWins: string[] = [];
+    let coreStressors: string[] = [];
+    let actionableAdvice: string[] = [];
+    let overallSummary = '';
+
+    try {
+      const cleanJson = genResult.text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const parsed = JSON.parse(cleanJson);
+      if (Array.isArray(parsed.topWins)) topWins = parsed.topWins.map((w: any) => String(w).trim()).filter(Boolean);
+      if (Array.isArray(parsed.coreStressors)) coreStressors = parsed.coreStressors.map((s: any) => String(s).trim()).filter(Boolean);
+      if (Array.isArray(parsed.actionableAdvice)) actionableAdvice = parsed.actionableAdvice.map((a: any) => String(a).trim()).filter(Boolean);
+      if (typeof parsed.overallSummary === 'string') overallSummary = parsed.overallSummary.trim();
+    } catch (parseErr) {
+      console.warn('[Weekly Report] JSON parse error, executing fallback extraction:', parseErr);
+      // Fallback extraction
+      const topWinsMatch = genResult.text.match(/"topWins"\s*:\s*\[([\s\S]*?)\]/);
+      const stressorsMatch = genResult.text.match(/"coreStressors"\s*:\s*\[([\s\S]*?)\]/);
+      const adviceMatch = genResult.text.match(/"actionableAdvice"\s*:\s*\[([\s\S]*?)\]/);
+
+      if (topWinsMatch && topWinsMatch[1]) {
+        topWins = topWinsMatch[1].split(/",\s*"/).map((s) => s.replace(/["\n\r]/g, '').trim()).filter(Boolean);
+      }
+      if (stressorsMatch && stressorsMatch[1]) {
+        coreStressors = stressorsMatch[1].split(/",\s*"/).map((s) => s.replace(/["\n\r]/g, '').trim()).filter(Boolean);
+      }
+      if (adviceMatch && adviceMatch[1]) {
+        actionableAdvice = adviceMatch[1].split(/",\s*"/).map((s) => s.replace(/["\n\r]/g, '').trim()).filter(Boolean);
+      }
+    }
+
+    // Ensure defaults if extraction was sparse
+    if (topWins.length === 0) {
+      topWins = [
+        'Demonstrated active emotional awareness by maintaining a regular journaling practice.',
+        'Successfully reflected on challenges and articulated thoughts with clarity.',
+      ];
+    }
+    if (coreStressors.length === 0) {
+      coreStressors = [
+        'Navigating workload boundaries and managing perceived cognitive strain.',
+      ];
+    }
+    if (actionableAdvice.length === 0) {
+      actionableAdvice = [
+        'Dedicate 5 minutes daily for intentional mental decompression and breathing.',
+        'Schedule restorative breaks before high-demand cognitive tasks.',
+      ];
+    }
+    if (!overallSummary) {
+      overallSummary = `Across ${weeklyEntries.length} analyzed entries, your emotional trajectory reflects active introspection with meaningful moments of resilience amidst cognitive challenges.`;
+    }
+
+    const reportId = `report-${Date.now()}`;
+
+    // Save report to Firestore subcollection users/{userId}/weekly_reports/{reportId}
+    const firestoreSaveResult = await saveWeeklyReportToFirestore({
+      userId,
+      reportId,
+      periodStart,
+      periodEnd,
+      entriesAnalyzed: weeklyEntries.length,
+      topWins,
+      coreStressors,
+      actionableAdvice,
+      overallSummary,
+      modelUsed: genResult.modelUsed,
+      userAuthHeader: authHeader,
+    });
+
+    const reportPayload = {
+      id: reportId,
+      userId,
+      generatedAt: now.toISOString(),
+      periodStart,
+      periodEnd,
+      entriesAnalyzed: weeklyEntries.length,
+      topWins,
+      coreStressors,
+      actionableAdvice,
+      overallSummary,
+      modelUsed: genResult.modelUsed,
+      firestorePersisted: firestoreSaveResult.success,
+      isSparseFallback,
+    };
+
+    res.json({
+      success: true,
+      report: reportPayload,
+      firestorePersisted: firestoreSaveResult.success,
+      latencyMs: genResult.latencyMs,
+    });
+  } catch (err: any) {
+    console.error('[Weekly Pattern Synthesizer Error]:', err);
+    res.status(500).json({
+      error: 'Failed to synthesize weekly pattern report',
+      details: err?.message || 'Internal server error',
+    });
+  }
+});
+
+// GET /api/journal/weekly-reports - Fetch user's saved weekly reports from Firestore
+app.get(['/api/journal/weekly-reports', '/api/journal/weekly-report'], async (req: Request, res: Response) => {
+  try {
+    const verifiedUser = (req as any).user as VerifiedUser;
+    if (!verifiedUser || !verifiedUser.uid) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const userId = verifiedUser.uid;
+    const authHeader = (req.headers.authorization || (req.headers as any)['Authorization']) as string | undefined;
+    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+
+    const firestoreHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (authHeader) {
+      firestoreHeaders['Authorization'] = authHeader.startsWith('Bearer ') ? authHeader : `Bearer ${authHeader}`;
+    }
+
+    const reportsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(userId)}/weekly_reports?pageSize=20`;
+    const firestoreRes = await fetch(reportsUrl, { headers: firestoreHeaders });
+
+    const reportsList: any[] = [];
+    if (firestoreRes.ok) {
+      const data = await firestoreRes.json().catch(() => null);
+      if (data && Array.isArray(data.documents)) {
+        for (const doc of data.documents) {
+          const fields = parseFirestoreFields(doc.fields || {});
+          const docId = doc.name ? doc.name.split('/').pop() : `report-${Math.random()}`;
+          reportsList.push({
+            id: fields.id || docId,
+            userId,
+            generatedAt: fields.generatedAt || doc.createTime || new Date().toISOString(),
+            periodStart: fields.periodStart || new Date().toISOString(),
+            periodEnd: fields.periodEnd || new Date().toISOString(),
+            entriesAnalyzed: typeof fields.entriesAnalyzed === 'number' ? fields.entriesAnalyzed : (fields.topWins?.length ? 5 : 0),
+            topWins: Array.isArray(fields.topWins) ? fields.topWins : [],
+            coreStressors: Array.isArray(fields.coreStressors) ? fields.coreStressors : [],
+            actionableAdvice: Array.isArray(fields.actionableAdvice) ? fields.actionableAdvice : [],
+            overallSummary: fields.overallSummary || '',
+            modelUsed: fields.modelUsed || 'gemini-3.8-flash',
+            firestorePersisted: true,
+          });
+        }
+      }
+    }
+
+    // Sort by generatedAt descending
+    reportsList.sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime());
+
+    res.json({
+      success: true,
+      reports: reportsList,
+      count: reportsList.length,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to fetch weekly reports', details: err?.message });
+  }
+});
+
 
 // Retrieve Persisted Interactions
 app.get('/api/interactions', (req: Request, res: Response) => {

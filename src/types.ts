@@ -160,4 +160,19 @@ export interface PastChatExchange {
   sourceEntries?: PastEntrySource[];
 }
 
+export interface WeeklyReport {
+  id: string;
+  userId: string;
+  generatedAt: string;
+  periodStart: string;
+  periodEnd: string;
+  entriesAnalyzed: number;
+  topWins: string[];
+  coreStressors: string[];
+  actionableAdvice: string[];
+  overallSummary?: string;
+  modelUsed?: string;
+  firestorePersisted?: boolean;
+}
+
 

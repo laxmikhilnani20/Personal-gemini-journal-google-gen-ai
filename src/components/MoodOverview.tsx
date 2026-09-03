@@ -23,6 +23,8 @@ interface MoodOverviewProps {
   recentSessions: ReflectionSession[];
   onStartNewEntry: () => void;
   isLiveUpdating?: boolean;
+  onGenerateWeeklyReport?: () => void;
+  isGeneratingWeeklyReport?: boolean;
 }
 
 export const MoodOverview: React.FC<MoodOverviewProps> = ({
@@ -33,6 +35,8 @@ export const MoodOverview: React.FC<MoodOverviewProps> = ({
   recentSessions,
   onStartNewEntry,
   isLiveUpdating = false,
+  onGenerateWeeklyReport,
+  isGeneratingWeeklyReport = false,
 }) => {
   // If no data is available yet (first-time user)
   if (!primaryEmotion && stressScore === null) {
@@ -177,6 +181,18 @@ export const MoodOverview: React.FC<MoodOverviewProps> = ({
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
             <span>Firestore Synced</span>
           </div>
+
+          {onGenerateWeeklyReport && (
+            <button
+              id="btn-mood-header-weekly-report"
+              onClick={onGenerateWeeklyReport}
+              disabled={isGeneratingWeeklyReport}
+              className="flex items-center gap-1.5 px-3 py-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs transition-all disabled:opacity-50 cursor-pointer shadow-xs"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>{isGeneratingWeeklyReport ? 'Synthesizing...' : 'Weekly Report'}</span>
+            </button>
+          )}
         </div>
       </div>
 

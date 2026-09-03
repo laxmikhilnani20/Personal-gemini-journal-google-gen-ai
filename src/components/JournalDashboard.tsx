@@ -52,9 +52,11 @@ import {
   ReflectionCategory,
   ReflectionMood,
   ReflectionSummary,
+  WeeklyReport,
 } from '../types';
 import { MoodOverview } from './MoodOverview';
 import { ChatWithPastView } from './ChatWithPastView';
+import { WeeklyReportView } from './WeeklyReportView';
 
 interface JournalDashboardProps {
   user: {
@@ -126,6 +128,12 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
   const [latestEmotion, setLatestEmotion] = useState<string | null>(null);
   const [latestStressScore, setLatestStressScore] = useState<number | null>(null);
   const [latestAssessmentTime, setLatestAssessmentTime] = useState<string | null>(null);
+
+  // Weekly Pattern Synthesizer State
+  const [weeklyReports, setWeeklyReports] = useState<WeeklyReport[]>([]);
+  const [currentWeeklyReport, setCurrentWeeklyReport] = useState<WeeklyReport | null>(null);
+  const [isGeneratingWeeklyReport, setIsGeneratingWeeklyReport] = useState<boolean>(false);
+  const [weeklyReportError, setWeeklyReportError] = useState<string | null>(null);
 
   // Dynamic derivations for most recent emotion & stress score across all reflections
   const latestSessionWithMood = sessions.find(
@@ -264,6 +272,85 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
 
     return () => unsubscribe();
   }, [user.uid]);
+
+  // Real-time synchronization for saved weekly_reports in Cloud Firestore
+  useEffect(() => {
+    if (!user?.uid) return;
+    const isFirebaseAuthUser = Boolean(auth.currentUser && auth.currentUser.uid === user.uid);
+    if (!isFirebaseAuthUser) return;
+
+    const reportsCol = collection(db, 'users', user.uid, 'weekly_reports');
+    const q = query(reportsCol, orderBy('generatedAt', 'desc'));
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const loaded: WeeklyReport[] = [];
+        snapshot.forEach((docSnap) => {
+          const d = docSnap.data() as WeeklyReport;
+          loaded.push({ ...d, id: docSnap.id });
+        });
+        setWeeklyReports(loaded);
+        if (loaded.length > 0) {
+          setCurrentWeeklyReport((prev) => prev || loaded[0]);
+        }
+      },
+      (error) => {
+        console.warn('Firestore weekly_reports listener error:', error);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user.uid]);
+
+  // Handler to call backend Weekly Pattern Synthesizer route
+  const handleGenerateWeeklyReport = async () => {
+    setIsGeneratingWeeklyReport(true);
+    setWeeklyReportError(null);
+
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetch('/api/journal/weekly-report', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          cachedEntries: sessions.slice(0, 20).map((s) => ({
+            id: s.id,
+            title: s.title,
+            category: s.category,
+            mood: s.mood,
+            primaryEmotion: s.primaryEmotion,
+            stressScore: s.stressScore,
+            replyText: s.replyText,
+            turns: s.turns,
+            createdAt: s.createdAt,
+            updatedAt: s.updatedAt,
+          })),
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || data.error || 'Failed to generate weekly pattern report');
+      }
+
+      if (data.report) {
+        setCurrentWeeklyReport(data.report);
+        setWeeklyReports((prev) => {
+          const filtered = prev.filter((r) => r.id !== data.report.id);
+          return [data.report, ...filtered];
+        });
+        // Switch to history tab to see the report below mood tracker
+        if (activeTab !== 'history') {
+          setActiveTab('history');
+        }
+      }
+    } catch (err: any) {
+      console.error('Weekly report generation error:', err);
+      setWeeklyReportError(err?.message || 'Failed to generate weekly pattern report');
+    } finally {
+      setIsGeneratingWeeklyReport(false);
+    }
+  };
 
   // Persist current session and sentiment analysis to Cloud Firestore
   const saveSessionToFirestore = async (
@@ -811,19 +898,40 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
           </button>
         </div>
 
-        {/* Firestore live saving indicator */}
-        <div className="hidden sm:flex items-center gap-1.5 text-[11px] font-mono text-slate-500">
-          {isSavingFirestore ? (
-            <>
-              <RefreshCw className="w-3 h-3 animate-spin text-emerald-400" />
-              <span className="text-emerald-400">Syncing to Firestore...</span>
-            </>
-          ) : (
-            <>
-              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-              <span>Synced with Cloud Firestore</span>
-            </>
-          )}
+        {/* Weekly Report CTA & Firestore live saving indicator */}
+        <div className="flex items-center gap-3">
+          <button
+            id="btn-nav-generate-weekly-report"
+            onClick={() => {
+              if (activeTab !== 'history') {
+                setActiveTab('history');
+              }
+              handleGenerateWeeklyReport();
+            }}
+            disabled={isGeneratingWeeklyReport}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-xl text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer shadow-xs"
+          >
+            {isGeneratingWeeklyReport ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+            ) : (
+              <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+            )}
+            <span>{isGeneratingWeeklyReport ? 'Synthesizing...' : 'Weekly Report'}</span>
+          </button>
+
+          <div className="hidden sm:flex items-center gap-1.5 text-[11px] font-mono text-slate-500">
+            {isSavingFirestore ? (
+              <>
+                <RefreshCw className="w-3 h-3 animate-spin text-emerald-400" />
+                <span className="text-emerald-400">Syncing to Firestore...</span>
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                <span>Synced with Cloud Firestore</span>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1317,6 +1425,19 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
             recentSessions={sessions}
             onStartNewEntry={handleStartNewSession}
             isLiveUpdating={submitting}
+            onGenerateWeeklyReport={handleGenerateWeeklyReport}
+            isGeneratingWeeklyReport={isGeneratingWeeklyReport}
+          />
+
+          {/* USER REQUESTED: WEEKLY PATTERN SYNTHESIZER (DISPLAYED BELOW MOOD TRACKER) */}
+          <WeeklyReportView
+            currentReport={currentWeeklyReport}
+            reportsList={weeklyReports}
+            isGenerating={isGeneratingWeeklyReport}
+            onGenerateReport={handleGenerateWeeklyReport}
+            onSelectReport={(rep) => setCurrentWeeklyReport(rep)}
+            recentSessionsCount={sessions.length}
+            error={weeklyReportError}
           />
 
           {/* Search & Category Filter Bar */}

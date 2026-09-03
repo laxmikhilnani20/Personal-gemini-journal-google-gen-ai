@@ -132,6 +132,32 @@
         }
       },
       "required": ["uid"]
+    },
+    "weeklyReport": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "generatedAt": { "type": "string" },
+        "periodStart": { "type": "string" },
+        "periodEnd": { "type": "string" },
+        "entriesAnalyzed": { "type": "number" },
+        "topWins": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "coreStressors": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "actionableAdvice": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "overallSummary": { "type": "string" },
+        "modelUsed": { "type": "string" }
+      },
+      "required": ["id", "userId", "generatedAt", "topWins", "coreStressors", "actionableAdvice"]
     }
   },
   "firestore": {
@@ -146,6 +172,10 @@
     "/users/{userId}/journal_entries/{entryId}": {
       "schema": "journalEntry",
       "description": "Individual sentiment-analyzed journal entries for mood tracking."
+    },
+    "/users/{userId}/weekly_reports/{reportId}": {
+      "schema": "weeklyReport",
+      "description": "Weekly synthesized patterns with top wins, core stressors, and actionable advice."
     }
   }
 }
