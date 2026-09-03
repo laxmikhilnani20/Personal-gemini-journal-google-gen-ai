@@ -921,8 +921,8 @@ async function saveReflectionToFirestore(
 ): Promise<{ success: boolean; firestoreId?: string; warning?: string }> {
   const timestamp = new Date().toISOString();
   try {
-    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
-    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+    const projectId = firebaseConfig.projectId || 'gen-lang-client-0507132090';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-remixthreatguard-8ff283e1-f3c5-49ea-8086-83732ee588ea';
 
     const cleaned = stripUndefinedBackend(params);
     const reflectionUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(cleaned.userId)}/reflections/${encodeURIComponent(cleaned.sessionId)}`;
@@ -980,8 +980,8 @@ async function saveJournalEntryToFirestore(
 ): Promise<{ success: boolean; firestoreId?: string; warning?: string }> {
   const timestamp = new Date().toISOString();
   try {
-    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
-    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+    const projectId = firebaseConfig.projectId || 'gen-lang-client-0507132090';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-remixthreatguard-8ff283e1-f3c5-49ea-8086-83732ee588ea';
 
     const cleaned = stripUndefinedBackend(params);
     const entriesUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(cleaned.userId)}/journal_entries`;
@@ -1363,6 +1363,312 @@ Output formatted Markdown with:
       details: err?.message || 'Internal server error',
     });
   }
+});
+
+// ==========================================
+// CHAT WITH YOUR PAST - FIRESTORE & GEMINI
+// ==========================================
+
+function parseFirestoreValue(val: any): any {
+  if (!val || typeof val !== 'object') return val;
+  if (val.stringValue !== undefined) return val.stringValue;
+  if (val.integerValue !== undefined) return parseInt(val.integerValue, 10);
+  if (val.doubleValue !== undefined) return parseFloat(val.doubleValue);
+  if (val.booleanValue !== undefined) return val.booleanValue;
+  if (val.timestampValue !== undefined) return val.timestampValue;
+  if (val.nullValue !== undefined) return null;
+  if (val.mapValue?.fields) {
+    const obj: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val.mapValue.fields)) {
+      obj[k] = parseFirestoreValue(v);
+    }
+    return obj;
+  }
+  if (val.arrayValue?.values) {
+    return val.arrayValue.values.map((item: any) => parseFirestoreValue(item));
+  }
+  return val;
+}
+
+function parseFirestoreDoc(doc: any): Record<string, any> {
+  const result: Record<string, any> = {};
+  if (!doc) return result;
+  if (doc.name) {
+    const parts = doc.name.split('/');
+    result.id = parts[parts.length - 1];
+  }
+  if (doc.createTime) result.createTime = doc.createTime;
+  if (doc.updateTime) result.updateTime = doc.updateTime;
+  if (doc.fields && typeof doc.fields === 'object') {
+    for (const [k, v] of Object.entries(doc.fields)) {
+      result[k] = parseFirestoreValue(v);
+    }
+  }
+  return result;
+}
+
+interface NormalizedPastEntry {
+  id: string;
+  date: string;
+  title?: string;
+  category?: string;
+  mood?: string;
+  primaryEmotion?: string;
+  stressScore?: number;
+  thought?: string;
+  replyText?: string;
+  source: 'journal_entry' | 'reflection' | 'client_cache';
+}
+
+/**
+ * Query Firestore for the user's last 20 journal entries.
+ * Fetches from users/{userId}/journal_entries and users/{userId}/reflections,
+ * aggregates, normalizes, sorts newest-first, and returns the top 20 entries.
+ */
+async function fetchUserPastEntriesFromFirestore(
+  userId: string,
+  userAuthHeader?: string,
+  limit: number = 20,
+  clientEntries?: any[]
+): Promise<NormalizedPastEntry[]> {
+  const projectId = firebaseConfig.projectId || 'gen-lang-client-0507132090';
+  const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-remixthreatguard-8ff283e1-f3c5-49ea-8086-83732ee588ea';
+  const entriesMap = new Map<string, NormalizedPastEntry>();
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (userAuthHeader) {
+    headers['Authorization'] = userAuthHeader.startsWith('Bearer ')
+      ? userAuthHeader
+      : `Bearer ${userAuthHeader}`;
+  }
+
+  // 1. Fetch structured individual entries from users/{userId}/journal_entries
+  try {
+    const journalUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(userId)}/journal_entries?pageSize=${limit}`;
+    const res = await fetch(journalUrl, { method: 'GET', headers });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.documents)) {
+        for (const doc of data.documents) {
+          const parsed = parseFirestoreDoc(doc);
+          const entryId = parsed.id || parsed.entryId || `je-${Math.random()}`;
+          const dateStr = parsed.createdAt || parsed.createTime || parsed.updatedAt || new Date().toISOString();
+          entriesMap.set(entryId, {
+            id: entryId,
+            date: dateStr,
+            title: parsed.title || 'Journal Entry',
+            category: parsed.category || 'Deep Reflection',
+            mood: parsed.declaredMood || parsed.mood || 'Reflective',
+            primaryEmotion: parsed.primaryEmotion || 'Reflective',
+            stressScore: typeof parsed.stressScore === 'number' ? parsed.stressScore : 4,
+            thought: parsed.thought || '',
+            replyText: parsed.replyText || '',
+            source: 'journal_entry',
+          });
+        }
+      }
+    } else {
+      const errText = await res.text().catch(() => '');
+      console.warn(`[Chat Past Firestore] journal_entries returned HTTP ${res.status}: ${errText.substring(0, 160)}`);
+    }
+  } catch (err: any) {
+    console.warn('[Chat Past Firestore] Error querying journal_entries:', err?.message || err);
+  }
+
+  // 2. Also fetch reflection sessions from users/{userId}/reflections
+  try {
+    const reflectionsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(userId)}/reflections?pageSize=${limit}`;
+    const res = await fetch(reflectionsUrl, { method: 'GET', headers });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.documents)) {
+        for (const doc of data.documents) {
+          const parsed = parseFirestoreDoc(doc);
+          const refId = parsed.id || parsed.sessionId || `ref-${Math.random()}`;
+          let userThoughts = '';
+          if (Array.isArray(parsed.turns)) {
+            userThoughts = parsed.turns
+              .filter((t: any) => t.role === 'user')
+              .map((t: any) => t.text)
+              .join('\n');
+          }
+          const dateStr = parsed.updatedAt || parsed.createdAt || parsed.createTime || new Date().toISOString();
+          if (!entriesMap.has(refId)) {
+            entriesMap.set(refId, {
+              id: refId,
+              date: dateStr,
+              title: parsed.title || 'Reflection Session',
+              category: parsed.category || 'Deep Reflection',
+              mood: parsed.mood || 'Reflective',
+              primaryEmotion: parsed.primaryEmotion || 'Reflective',
+              stressScore: typeof parsed.stressScore === 'number' ? parsed.stressScore : 4,
+              thought: userThoughts || parsed.thought || parsed.sampleThought || '',
+              replyText: parsed.replyText || '',
+              source: 'reflection',
+            });
+          }
+        }
+      }
+    } else {
+      const errText = await res.text().catch(() => '');
+      console.warn(`[Chat Past Firestore] reflections returned HTTP ${res.status}: ${errText.substring(0, 160)}`);
+    }
+  } catch (err: any) {
+    console.warn('[Chat Past Firestore] Error querying reflections:', err?.message || err);
+  }
+
+  // 3. Fallback / supplement with client session cache if provided (e.g. preview mode or fresh entries)
+  if (Array.isArray(clientEntries) && clientEntries.length > 0) {
+    for (const ce of clientEntries) {
+      const ceId = ce.id || `client-${Math.random()}`;
+      if (!entriesMap.has(ceId)) {
+        let thoughtText = ce.thought || '';
+        if (!thoughtText && Array.isArray(ce.turns)) {
+          thoughtText = ce.turns
+            .filter((t: any) => t.role === 'user')
+            .map((t: any) => t.text)
+            .join('\n');
+        }
+        entriesMap.set(ceId, {
+          id: ceId,
+          date: ce.updatedAt || ce.createdAt || new Date().toISOString(),
+          title: ce.title || 'Journal Reflection',
+          category: ce.category || 'Deep Reflection',
+          mood: ce.mood || 'Reflective',
+          primaryEmotion: ce.primaryEmotion || ce.mood || 'Reflective',
+          stressScore: typeof ce.stressScore === 'number' ? ce.stressScore : 4,
+          thought: thoughtText,
+          replyText: ce.replyText || (ce.turns?.find((t: any) => t.role === 'model')?.text) || '',
+          source: 'client_cache',
+        });
+      }
+    }
+  }
+
+  // Sort descending by date (most recent first) and cap at requested limit (20)
+  const sorted = Array.from(entriesMap.values()).sort((a, b) => {
+    const timeA = new Date(a.date).getTime() || 0;
+    const timeB = new Date(b.date).getTime() || 0;
+    return timeB - timeA;
+  });
+
+  return sorted.slice(0, limit);
+}
+
+// Backend API route for "Chat With Your Past"
+app.post('/api/journal/chat-past', async (req: Request, res: Response) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const question = String(body.question || body.prompt || body.message || '').trim();
+
+    if (!question) {
+      res.status(400).json({
+        error: 'Question is required',
+        message: 'Please provide a question to search and chat with your past journal entries',
+      });
+      return;
+    }
+
+    // Verify authenticated user from authMiddleware
+    const verifiedUser = (req as any).user;
+    if (!verifiedUser || !verifiedUser.uid) {
+      res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Valid Firebase authentication token is required to access your past journal entries',
+      });
+      return;
+    }
+
+    const targetUserId = verifiedUser.uid;
+    const userAuthHeader = (req.headers.authorization || (req.headers as any)['Authorization']) as string | undefined;
+
+    console.log(`[Chat With Your Past] Querying Firestore for user ${targetUserId}'s last 20 entries...`);
+    const entries = await fetchUserPastEntriesFromFirestore(
+      targetUserId,
+      userAuthHeader,
+      20,
+      Array.isArray(body.clientEntries) ? body.clientEntries : undefined
+    );
+
+    console.log(`[Chat With Your Past] Retrieved ${entries.length} entries for user ${targetUserId}. Grounding Gemini prompt...`);
+
+    // Build context strictly from user's last 20 journal entries
+    let entriesContext = '';
+    if (entries.length === 0) {
+      entriesContext = 'NOTE: The user currently has NO recorded past journal entries in their account.\n';
+    } else {
+      entriesContext = `Below are the user's past journal entries (up to ${entries.length} most recent entries retrieved from Cloud Firestore, ordered from newest to oldest):\n\n`;
+      entries.forEach((entry, i) => {
+        entriesContext += `### Entry ${i + 1} (Date: ${entry.date})\n`;
+        if (entry.title) entriesContext += `- Title: ${entry.title}\n`;
+        if (entry.category) entriesContext += `- Category: ${entry.category}\n`;
+        if (entry.mood) entriesContext += `- Declared Mood: ${entry.mood}\n`;
+        if (entry.primaryEmotion) entriesContext += `- Assessed Emotion: ${entry.primaryEmotion}\n`;
+        if (entry.stressScore !== undefined) entriesContext += `- Cognitive Stress Level: ${entry.stressScore}/10\n`;
+        if (entry.thought) entriesContext += `- User's Thought: "${entry.thought.replace(/\n+/g, ' ')}"\n`;
+        if (entry.replyText) entriesContext += `- Reflection Guidance: "${entry.replyText.replace(/\n+/g, ' ').slice(0, 350)}"\n`;
+        entriesContext += `\n`;
+      });
+    }
+
+    const systemInstruction = `You are "Chat With Your Past", a deeply perceptive and empathetic memory companion inside the ThreatGuard AI Journal.
+The user is asking questions about their thoughts, emotions, recurring patterns, personal reflections, and growth recorded in their journal.
+
+CRITICAL DIRECTIVES:
+1. STRICT DATA-BACKED GROUNDING: Base your answer STRICTLY and ONLY on the user's past journal entries provided in the context.
+2. NO HALLUCINATION: Do NOT invent, extrapolate, or assume events, people, dates, or feelings that are not explicitly documented in their entries.
+3. CONCRETE CITATIONS: Quote their thoughts where relevant, cite dates or timeframes (e.g. "On September 2nd, you wrote..."), and reference their mood and stress score (e.g. "when your stress score was 3/10").
+4. TRANSPARENCY: If the provided entries do NOT contain information to answer the question, state so clearly and compassionately (e.g. "Based on your past 20 entries, you haven't written about..."). Mention what themes, emotions, or reflections ARE present instead.
+5. IF NO ENTRIES EXIST: Gently explain that no past journal entries were found in their account yet, and encourage them to write their first reflection in the Active Reflection Studio.
+6. TONE: Warm, observant, non-judgmental, and constructive. Format your response with clean Markdown (bold highlights, clear bullet points).`;
+
+    const userPrompt = `${entriesContext}
+--------------------------------------------------
+User's Question:
+"${question}"
+
+Please provide a thoughtful, data-backed answer based strictly on the user's past journal entries above:`;
+
+    const result = await generateContentWithFallback(userPrompt, systemInstruction);
+
+    res.json({
+      success: true,
+      answer: result.text,
+      question,
+      entriesAnalyzed: entries.length,
+      referencedEntries: entries.map((e) => ({
+        id: e.id,
+        date: e.date,
+        title: e.title,
+        category: e.category,
+        mood: e.mood,
+        primaryEmotion: e.primaryEmotion,
+        stressScore: e.stressScore,
+        thoughtSnippet: (e.thought || '').slice(0, 160),
+        replySnippet: (e.replyText || '').slice(0, 160),
+      })),
+      modelUsed: result.modelUsed,
+      latencyMs: result.latencyMs,
+      simulated: result.simulated || false,
+    });
+  } catch (err: any) {
+    console.error('Chat With Your Past route error:', err);
+    res.status(500).json({
+      error: 'Failed to process Chat With Your Past request',
+      details: err?.message || 'Internal server error',
+    });
+  }
+});
+
+// Alias endpoint for alternative route naming compatibility
+app.post('/api/journal/ask-past', async (req: Request, res: Response) => {
+  return (app as any)._router.handle(
+    Object.assign(req, { url: '/api/journal/chat-past' }),
+    res,
+    () => {}
+  );
 });
 
 

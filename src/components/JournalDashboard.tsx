@@ -53,6 +53,7 @@ import {
   ReflectionSummary,
 } from '../types';
 import { MoodOverview } from './MoodOverview';
+import { ChatWithPastView } from './ChatWithPastView';
 
 interface JournalDashboardProps {
   user: {
@@ -94,8 +95,8 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
   user,
   onSignOut,
 }) => {
-  // Navigation tabs: 'studio' (active reflection) | 'history' (past entries) | 'summary' (active session summary)
-  const [activeTab, setActiveTab] = useState<'studio' | 'history' | 'summary'>('studio');
+  // Navigation tabs: 'studio' (active reflection) | 'chat-past' (chat with your journal) | 'history' (past entries) | 'summary' (active session summary)
+  const [activeTab, setActiveTab] = useState<'studio' | 'chat-past' | 'history' | 'summary'>('studio');
 
   // Firestore Sessions State
   const [sessions, setSessions] = useState<ReflectionSession[]>([]);
@@ -755,6 +756,28 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
           </button>
 
           <button
+            id="tab-chat-past"
+            onClick={() => setActiveTab('chat-past')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+              activeTab === 'chat-past'
+                ? 'bg-emerald-500 text-slate-950 font-bold shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>Chat with your Journal</span>
+            <span
+              className={`px-1.5 py-0.2 rounded-full font-mono text-[10px] ${
+                activeTab === 'chat-past'
+                  ? 'bg-slate-950/20 text-slate-950 font-bold'
+                  : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-bold'
+              }`}
+            >
+              AI Memory
+            </span>
+          </button>
+
+          <button
             id="tab-summary"
             onClick={() => setActiveTab('summary')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
@@ -802,6 +825,16 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
           )}
         </div>
       </div>
+
+      {/* TAB: CHAT WITH YOUR JOURNAL (MEMORY RETRIEVAL) */}
+      {activeTab === 'chat-past' && (
+        <ChatWithPastView
+          user={user}
+          sessions={sessions}
+          onNavigateToStudio={() => setActiveTab('studio')}
+          onSelectPastSession={handleSelectPastSession}
+        />
+      )}
 
       {/* TAB 1: ACTIVE REFLECTION STUDIO */}
       {activeTab === 'studio' && (

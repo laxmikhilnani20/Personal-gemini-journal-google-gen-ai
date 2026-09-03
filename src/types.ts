@@ -140,3 +140,37 @@ export interface JournalEntryResponse {
   latencyMs?: number;
 }
 
+export interface PastEntryContextItem {
+  id: string;
+  date: string;
+  title?: string;
+  category?: string;
+  mood?: string;
+  primaryEmotion?: string;
+  stressScore?: number;
+  thoughtSnippet: string;
+  replySnippet?: string;
+}
+
+export interface ChatPastMessage {
+  id: string;
+  role: 'user' | 'model';
+  text: string;
+  timestamp: string;
+  entriesAnalyzed?: number;
+  referencedEntries?: PastEntryContextItem[];
+  modelUsed?: string;
+  latencyMs?: number;
+}
+
+export interface ChatPastResponse {
+  success: boolean;
+  answer: string;
+  question: string;
+  entriesAnalyzed: number;
+  referencedEntries: PastEntryContextItem[];
+  modelUsed?: string;
+  latencyMs?: number;
+  warning?: string;
+}
+
