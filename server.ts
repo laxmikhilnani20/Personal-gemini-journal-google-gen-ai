@@ -286,10 +286,9 @@ export function stripUndefined<T>(obj: T): T {
 // 3. GEMINI CLIENT & MODEL FALLBACK LADDER
 // ==========================================
 const FALLBACK_MODELS = [
-  'gemini-3.6-flash',       // Primary
+  'gemini-3.8-flash',       // Primary (Basic Text Tasks & Q&A)
   'gemini-3.1-flash-lite',  // High-Availability Fallback
   'gemini-flash-latest',    // Dynamic Alias
-  'gemini-3.7-flash',       // Deep Reasoning Fallback
 ] as const;
 
 let genAIClient: GoogleGenAI | null = null;
@@ -1360,6 +1359,273 @@ Output formatted Markdown with:
     console.error('Brainstorming error:', err);
     res.status(500).json({
       error: 'Failed to brainstorm ideas',
+      details: err?.message || 'Internal server error',
+    });
+  }
+});
+
+// ==========================================
+// 5C. CHAT WITH YOUR PAST (GROUNDED MEMORY RETRIEVAL)
+// ==========================================
+
+// Helper to parse Firestore REST fields into clean JS values
+function parseFirestoreFields(fields: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {};
+  if (!fields || typeof fields !== 'object') return result;
+  for (const [key, val] of Object.entries(fields)) {
+    if (!val || typeof val !== 'object') continue;
+    if ('stringValue' in val) result[key] = val.stringValue;
+    else if ('integerValue' in val) result[key] = parseInt(val.integerValue, 10);
+    else if ('doubleValue' in val) result[key] = Number(val.doubleValue);
+    else if ('booleanValue' in val) result[key] = val.booleanValue;
+    else if ('timestampValue' in val) result[key] = val.timestampValue;
+    else if ('arrayValue' in val) {
+      result[key] = (val.arrayValue?.values || []).map((v: any) => {
+        if (!v || typeof v !== 'object') return v;
+        if ('stringValue' in v) return v.stringValue;
+        if ('integerValue' in v) return parseInt(v.integerValue, 10);
+        if ('mapValue' in v) return parseFirestoreFields(v.mapValue?.fields || {});
+        return v;
+      });
+    } else if ('mapValue' in val) {
+      result[key] = parseFirestoreFields(val.mapValue?.fields || {});
+    }
+  }
+  return result;
+}
+
+interface RetrievedJournalEntry {
+  id: string;
+  title: string;
+  category?: string;
+  thought: string;
+  replyText?: string;
+  primaryEmotion?: string;
+  stressScore?: number;
+  createdAt: string;
+}
+
+// Chat With Your Past API Route: Queries Cloud Firestore for the user's last 20 entries
+// and feeds them as strict context to Gemini 3.8 Flash.
+app.post(['/api/journal/chat-with-past', '/api/journal/chat-past'], async (req: Request, res: Response) => {
+  try {
+    const verifiedUser = (req as any).user as VerifiedUser;
+    if (!verifiedUser || !verifiedUser.uid) {
+      res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Firebase token verification required to chat with your journal entries.',
+      });
+      return;
+    }
+
+    const userId = verifiedUser.uid;
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const question = String(body.question || body.prompt || body.query || '').trim();
+
+    if (!question) {
+      res.status(400).json({
+        error: 'Question is required',
+        message: 'Please provide a question to search and chat with your past journal entries.',
+      });
+      return;
+    }
+
+    const authHeader = (req.headers.authorization || (req.headers as any)['Authorization']) as string | undefined;
+    const projectId = firebaseConfig.projectId || 'handy-diode-29brs';
+    const databaseId = firebaseConfig.firestoreDatabaseId || 'ai-studio-threatguardagent-fe757982-c66f-43ff-9c44-e692209d2722';
+
+    const firestoreHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (authHeader) {
+      firestoreHeaders['Authorization'] = authHeader.startsWith('Bearer ') ? authHeader : `Bearer ${authHeader}`;
+    }
+
+    // Query Firestore for the user's journal entries and reflection sessions
+    const journalEntriesUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(userId)}/journal_entries?pageSize=25`;
+    const reflectionsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/users/${encodeURIComponent(userId)}/reflections?pageSize=25`;
+
+    const gatheredEntries: RetrievedJournalEntry[] = [];
+
+    try {
+      const [journalRes, reflectionsRes] = await Promise.allSettled([
+        fetch(journalEntriesUrl, { headers: firestoreHeaders }),
+        fetch(reflectionsUrl, { headers: firestoreHeaders }),
+      ]);
+
+      // 1. Process journal_entries subcollection
+      if (journalRes.status === 'fulfilled' && journalRes.value.ok) {
+        const jData = await journalRes.value.json().catch(() => null);
+        if (jData && Array.isArray(jData.documents)) {
+          for (const doc of jData.documents) {
+            const fields = parseFirestoreFields(doc.fields || {});
+            const docId = doc.name ? doc.name.split('/').pop() : `entry-${Math.random()}`;
+            const thought = String(fields.thought || '').trim();
+            const replyText = String(fields.replyText || '').trim();
+            const title = String(fields.title || 'Journal Entry').trim();
+            const createdAt = fields.createdAt || doc.createTime || new Date().toISOString();
+
+            if (thought || replyText) {
+              gatheredEntries.push({
+                id: fields.id || docId,
+                title,
+                category: fields.category,
+                thought,
+                replyText,
+                primaryEmotion: fields.primaryEmotion || fields.declaredMood,
+                stressScore: typeof fields.stressScore === 'number' ? fields.stressScore : undefined,
+                createdAt,
+              });
+            }
+          }
+        }
+      }
+
+      // 2. Process reflections subcollection
+      if (reflectionsRes.status === 'fulfilled' && reflectionsRes.value.ok) {
+        const rData = await reflectionsRes.value.json().catch(() => null);
+        if (rData && Array.isArray(rData.documents)) {
+          for (const doc of rData.documents) {
+            const fields = parseFirestoreFields(doc.fields || {});
+            const docId = doc.name ? doc.name.split('/').pop() : `ref-${Math.random()}`;
+            const title = String(fields.title || 'Reflection Session').trim();
+            const replyText = String(fields.replyText || '').trim();
+            const createdAt = fields.createdAt || fields.updatedAt || doc.createTime || new Date().toISOString();
+
+            // Extract turns if present
+            let turnsThought = '';
+            if (Array.isArray(fields.turns)) {
+              turnsThought = fields.turns
+                .map((t: any) => `${t.role === 'user' ? 'User' : 'Partner'}: ${t.text}`)
+                .join('\n');
+            }
+
+            const thought = turnsThought || String(fields.thought || '').trim();
+
+            // Deduplicate if already collected
+            if (!gatheredEntries.some((e) => e.id === (fields.id || docId))) {
+              gatheredEntries.push({
+                id: fields.id || docId,
+                title,
+                category: fields.category,
+                thought,
+                replyText,
+                primaryEmotion: fields.primaryEmotion || fields.mood,
+                stressScore: typeof fields.stressScore === 'number' ? fields.stressScore : undefined,
+                createdAt,
+              });
+            }
+          }
+        }
+      }
+    } catch (firestoreErr) {
+      console.warn('[Chat with Past] Firestore query warning caught safely:', firestoreErr);
+    }
+
+    // 3. Fallback for demo mode or offline sandbox if 0 entries in Firestore
+    if (gatheredEntries.length === 0 && Array.isArray(body.cachedEntries) && body.cachedEntries.length > 0) {
+      for (const item of body.cachedEntries) {
+        let thought = '';
+        if (Array.isArray(item.turns)) {
+          thought = item.turns.map((t: any) => `${t.role === 'user' ? 'User' : 'Partner'}: ${t.text}`).join('\n');
+        } else {
+          thought = item.thought || item.text || '';
+        }
+        gatheredEntries.push({
+          id: item.id || `sample-${Math.random()}`,
+          title: item.title || 'Reflection',
+          category: item.category,
+          thought,
+          replyText: item.replyText,
+          primaryEmotion: item.primaryEmotion || item.mood,
+          stressScore: item.stressScore,
+          createdAt: item.updatedAt || item.createdAt || new Date().toISOString(),
+        });
+      }
+    }
+
+    // Sort entries by timestamp descending and take the user's last 20 entries
+    gatheredEntries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const last20Entries = gatheredEntries.slice(0, 20);
+
+    // If no past entries exist yet
+    if (last20Entries.length === 0) {
+      res.json({
+        success: true,
+        answer: "I couldn't find any past journal entries saved in your Cloud Firestore account yet.\n\nOnce you record your first reflection in the **Reflection Studio**, I'll be able to analyze your past thoughts, emotional trends, recurring decisions, and personal growth milestones!",
+        entriesAnalyzed: 0,
+        entries: [],
+        modelUsed: 'gemini-3.8-flash',
+        latencyMs: 0,
+      });
+      return;
+    }
+
+    // Construct Context for Gemini strictly based on the past 20 entries
+    let entriesContext = `Context: Below are the user's last ${last20Entries.length} journal entries retrieved securely from Cloud Firestore (ordered from newest to oldest):\n\n`;
+
+    last20Entries.forEach((entry, idx) => {
+      const dateFormatted = new Date(entry.createdAt).toLocaleDateString('en-US', {
+        weekday: 'short',
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      entriesContext += `--- [JOURNAL ENTRY #${idx + 1}] ---\n`;
+      entriesContext += `Entry ID: ${entry.id}\n`;
+      entriesContext += `Date/Time: ${dateFormatted} (${entry.createdAt})\n`;
+      entriesContext += `Session Title: ${entry.title}\n`;
+      if (entry.category) entriesContext += `Category: ${entry.category}\n`;
+      if (entry.primaryEmotion) entriesContext += `Emotional State: ${entry.primaryEmotion}\n`;
+      if (typeof entry.stressScore === 'number') entriesContext += `Perceived Stress Level: ${entry.stressScore}/10\n`;
+      if (entry.thought) entriesContext += `User's Written Thoughts:\n"${entry.thought}"\n`;
+      if (entry.replyText) entriesContext += `AI Guidance Received:\n"${entry.replyText}"\n`;
+      entriesContext += `\n`;
+    });
+
+    const systemInstruction = `You are 'Chat With Your Past', an intelligent, empathetic memory and personal journaling AI assistant.
+Your role is to answer the user's question strictly and accurately based on their past journal entries provided in the context.
+
+STRICT GROUNDING & BEHAVIORAL DIRECTIVES:
+1. STRICT DATA-BACKED GROUNDING: Base your answer EXCLUSIVELY on the facts, feelings, reflections, dates, and experiences documented in the provided past journal entries. Never assume, fabricate, or hallucinate details that are not in the entries.
+2. HONEST GAPS: If the user's question asks about a person, event, or topic that is NOT mentioned in any of the provided entries, clearly and gently inform the user that their past journal entries do not contain any records or mentions of that topic. Do NOT extrapolate or invent facts.
+3. CITATIONS & TIMESTAMPS: Always reference specific entries when answering (e.g. "In your reflection titled '...' on [Date], you wrote...", "On [Date], when feeling [Emotion]...").
+4. SYNTHESIS & EVOLUTION: If the user asks about patterns or personal shifts (e.g., "How has my anxiety changed?", "What have I learned about my work boundaries?"), analyze the trajectory across multiple entries in chronological sequence.
+5. TONE & FORMATTING: Maintain a compassionate, clear, and objective tone. Use clean Markdown formatting with headers, bullet points, and date citations.`;
+
+    const userPrompt = `${entriesContext}
+
+---
+USER QUESTION:
+"${question}"
+
+Please answer the user's question based strictly on their past journal entries:`;
+
+    const genResult = await generateContentWithFallback(userPrompt, systemInstruction);
+
+    res.json({
+      success: true,
+      answer: genResult.text,
+      entriesAnalyzed: last20Entries.length,
+      entries: last20Entries.map((e) => ({
+        id: e.id,
+        title: e.title,
+        createdAt: e.createdAt,
+        primaryEmotion: e.primaryEmotion,
+        stressScore: e.stressScore,
+        preview: e.thought ? e.thought.substring(0, 100) : (e.replyText ? e.replyText.substring(0, 100) : ''),
+      })),
+      modelUsed: genResult.modelUsed,
+      latencyMs: genResult.latencyMs,
+      simulated: genResult.simulated || false,
+    });
+  } catch (err: any) {
+    console.error('[Chat With Past Error]:', err);
+    res.status(500).json({
+      error: 'Failed to process Chat With Your Past request',
       details: err?.message || 'Internal server error',
     });
   }

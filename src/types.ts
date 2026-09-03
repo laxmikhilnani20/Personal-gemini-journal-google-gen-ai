@@ -140,3 +140,24 @@ export interface JournalEntryResponse {
   latencyMs?: number;
 }
 
+export interface PastEntrySource {
+  id: string;
+  title: string;
+  createdAt?: string;
+  primaryEmotion?: string;
+  stressScore?: number;
+  preview?: string;
+}
+
+export interface PastChatExchange {
+  id: string;
+  question: string;
+  answer: string;
+  timestamp: string;
+  entriesAnalyzed: number;
+  modelUsed?: string;
+  latencyMs?: number;
+  sourceEntries?: PastEntrySource[];
+}
+
+

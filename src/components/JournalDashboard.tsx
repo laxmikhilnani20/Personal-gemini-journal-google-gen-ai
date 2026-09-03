@@ -26,6 +26,7 @@ import {
   Check,
   ArrowLeft,
   Filter,
+  MessageSquare,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import {
@@ -53,6 +54,7 @@ import {
   ReflectionSummary,
 } from '../types';
 import { MoodOverview } from './MoodOverview';
+import { ChatWithPastView } from './ChatWithPastView';
 
 interface JournalDashboardProps {
   user: {
@@ -94,8 +96,8 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
   user,
   onSignOut,
 }) => {
-  // Navigation tabs: 'studio' (active reflection) | 'history' (past entries) | 'summary' (active session summary)
-  const [activeTab, setActiveTab] = useState<'studio' | 'history' | 'summary'>('studio');
+  // Navigation tabs: 'studio' (active reflection) | 'history' (past entries) | 'summary' (active session summary) | 'chat-past' (chat with journal)
+  const [activeTab, setActiveTab] = useState<'studio' | 'history' | 'summary' | 'chat-past'>('studio');
 
   // Firestore Sessions State
   const [sessions, setSessions] = useState<ReflectionSession[]>([]);
@@ -785,6 +787,28 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
               {sessions.length}
             </span>
           </button>
+
+          <button
+            id="tab-chat-past"
+            onClick={() => setActiveTab('chat-past')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+              activeTab === 'chat-past'
+                ? 'bg-emerald-500 text-slate-950 font-bold shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <MessageSquare className="w-4 h-4" />
+            <span>Chat with your Journal</span>
+            <span
+              className={`px-1.5 py-0.2 rounded-full font-mono text-[9px] ${
+                activeTab === 'chat-past'
+                  ? 'bg-slate-950/20 text-slate-950 font-bold'
+                  : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+              }`}
+            >
+              Past 20
+            </span>
+          </button>
         </div>
 
         {/* Firestore live saving indicator */}
@@ -1430,6 +1454,15 @@ export const JournalDashboard: React.FC<JournalDashboardProps> = ({
             </div>
           )}
         </div>
+      )}
+
+      {/* TAB 4: CHAT WITH YOUR JOURNAL (GROUNDED RETRIEVAL) */}
+      {activeTab === 'chat-past' && (
+        <ChatWithPastView
+          user={user}
+          sessions={sessions}
+          onNavigateToStudio={() => setActiveTab('studio')}
+        />
       )}
     </div>
   );

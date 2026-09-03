@@ -1,6 +1,6 @@
 {
   "name": "ThreatGuard - Agentic Threat Modeling & Security Studio",
-  "description": "User-authenticated AI journal and reflection workspace powered by Gemini 3.6 Flash and Cloud Firestore with Google Sign-In and private user-isolated storage.",
+  "description": "User-authenticated AI journal and reflection workspace powered by Gemini and Cloud Firestore with Chat With Your Past grounded memory retrieval and private user-isolated storage.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
