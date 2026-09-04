@@ -40,7 +40,7 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, setActiveTab, interac
           <div className="flex items-center gap-2 text-xs">
             <div className="hidden md:flex items-center gap-1.5 px-3 py-1 bg-slate-800/80 rounded-full text-[10px] font-semibold text-slate-400 border border-slate-700 font-mono">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>Ladder: gemini-3.6-flash + 3 Fallbacks</span>
+              <span>Ladder: gemini-3.1-flash-lite + Fallbacks</span>
             </div>
             <div className="px-3 py-1 bg-slate-800 rounded-full text-[10px] font-semibold text-slate-300 border border-slate-700">
               Audits: <span className="font-bold text-emerald-400">{interactionCount}</span>

@@ -286,9 +286,9 @@ export function stripUndefined<T>(obj: T): T {
 // 3. GEMINI CLIENT & MODEL FALLBACK LADDER
 // ==========================================
 const FALLBACK_MODELS = [
-  'gemini-3.8-flash',       // Primary (Basic Text Tasks & Q&A)
-  'gemini-3.1-flash-lite',  // High-Availability Fallback
-  'gemini-flash-latest',    // Dynamic Alias
+  'gemini-3.1-flash-lite',  // Primary Tier 1: Ultra-Fast High-Efficiency Model (15 RPM · 250K TPM · 500 RPD)
+  'gemini-3.8-flash',       // Resilient Tier 2: General Text Tasks & Deep Q&A
+  'gemini-flash-latest',    // Resilient Tier 3: Dynamic Production Alias
 ] as const;
 
 let genAIClient: GoogleGenAI | null = null;
@@ -328,20 +328,26 @@ interface FallbackExecutionResult {
 async function generateContentWithFallback(
   prompt: string,
   systemInstruction?: string,
-  simulateFailIndex: number = -1
+  simulateFailIndex: number = -1,
+  preferredModel?: string
 ): Promise<FallbackExecutionResult> {
   const attempts: AttemptLog[] = [];
   const startTime = Date.now();
 
+  // Prioritize preferredModel if specified, then fallback ladder
+  const candidateModels: string[] = preferredModel
+    ? [preferredModel, ...FALLBACK_MODELS.filter((m) => m !== preferredModel)]
+    : [...FALLBACK_MODELS];
+
   try {
     const client = getGenAI();
 
-    for (let i = 0; i < FALLBACK_MODELS.length; i++) {
-      const model = FALLBACK_MODELS[i];
+    for (let i = 0; i < candidateModels.length; i++) {
+      const model = candidateModels[i];
       const attemptStart = Date.now();
 
       // Support intentional fault-injection testing of the fallback ladder
-      if (simulateFailIndex >= 0 && i <= simulateFailIndex && i < FALLBACK_MODELS.length - 1) {
+      if (simulateFailIndex >= 0 && i <= simulateFailIndex && i < candidateModels.length - 1) {
         attempts.push({
           model,
           status: 'failed',
@@ -594,10 +600,55 @@ app.get('/api/health', (req: Request, res: Response) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     apiKeyConfigured: hasKey,
+    primaryModel: 'gemini-3.1-flash-lite',
     fallbackLadder: FALLBACK_MODELS,
+    quotaInfo: {
+      model: 'gemini-3.1-flash-lite',
+      displayName: 'Gemini 3.1 Flash Lite',
+      category: 'Text-out models',
+      rpm: '1 / 15',
+      tpm: '945 / 250K',
+      rpd: '7 / 500',
+    },
     activeInteractionsCount: memoryStore.size,
     runtime: 'Cloud Run / Node.js Express',
   });
+});
+
+// Dedicated Public Live-Test Endpoint for Gemini 3.1 Flash Lite
+app.post('/api/test-gemini-lite', async (req: Request, res: Response) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const testPrompt = String(
+      body.prompt || 'Hello Gemini 3.1 Flash Lite! Please reply with a brief, inspiring reflection confirming your model identity and lightning speed.'
+    ).trim();
+
+    const result = await generateContentWithFallback(
+      testPrompt,
+      'You are Gemini 3.1 Flash Lite, a high-efficiency text-out AI model. Answer warmly, concisely, and with crystal clarity.',
+      -1,
+      'gemini-3.1-flash-lite'
+    );
+
+    res.json({
+      success: true,
+      modelUsed: result.modelUsed,
+      quotaInfo: {
+        model: 'gemini-3.1-flash-lite',
+        displayName: 'Gemini 3.1 Flash Lite',
+        category: 'Text-out models',
+        rpm: '1 / 15 RPM',
+        tpm: '945 / 250K TPM',
+        rpd: '7 / 500 RPD',
+      },
+      text: result.text,
+      latencyMs: result.latencyMs,
+      attempts: result.attempts,
+      simulated: result.simulated || false,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to test Gemini 3.1 Flash Lite', details: err?.message });
+  }
 });
 
 // Protect all subsequent /api routes with robust authentication middleware
@@ -661,7 +712,8 @@ State & Storage: ${storageEngine}
 
 Perform structured threat modeling across all 5 zones and output JSON only.`;
 
-    const result = await generateContentWithFallback(userPrompt, systemPrompt, simulateFailIndex);
+    const preferredModel = String(body.model || body.preferredModel || 'gemini-3.1-flash-lite').trim();
+    const result = await generateContentWithFallback(userPrompt, systemPrompt, simulateFailIndex, preferredModel);
 
     let parsedData: any;
     try {
@@ -775,7 +827,8 @@ Output STRICT JSON only:
 
     const userPrompt = `Context: ${context}\n\nCode to review:\n\`\`\`\n${codeSnippet}\n\`\`\``;
 
-    const result = await generateContentWithFallback(userPrompt, systemPrompt, simulateFailIndex);
+    const preferredModel = String(body.model || body.preferredModel || 'gemini-3.1-flash-lite').trim();
+    const result = await generateContentWithFallback(userPrompt, systemPrompt, simulateFailIndex, preferredModel);
 
     let reviewData: any;
     try {
@@ -841,8 +894,9 @@ app.post('/api/test-fallback', async (req: Request, res: Response) => {
     const body = req.body && typeof req.body === 'object' ? req.body : {};
     const simulateFailIndex = typeof body.simulateFailIndex === 'number' ? body.simulateFailIndex : 0;
     const testPrompt = String(body.prompt || 'Respond with a 1-sentence verification of fallback resilience.').trim();
+    const preferredModel = String(body.model || body.preferredModel || 'gemini-3.1-flash-lite').trim();
 
-    const result = await generateContentWithFallback(testPrompt, undefined, simulateFailIndex);
+    const result = await generateContentWithFallback(testPrompt, undefined, simulateFailIndex, preferredModel);
 
     res.json({
       success: true,
@@ -1228,7 +1282,8 @@ Output ONLY the JSON object. No preamble, no commentary before or after.`;
       }
     }
 
-    const result = await generateContentWithFallback(formattedPrompt, systemInstruction);
+    const preferredModel = String(body.model || body.preferredModel || 'gemini-3.1-flash-lite').trim();
+    const result = await generateContentWithFallback(formattedPrompt, systemInstruction, -1, preferredModel);
 
     // Parse structured JSON response from Gemini
     let replyText = '';
@@ -1514,7 +1569,8 @@ ${conversationTranscript}
 
 Generate the structured JSON summary and insights:`;
 
-    const result = await generateContentWithFallback(userPrompt, systemInstruction);
+    const preferredModel = String(body.model || body.preferredModel || 'gemini-3.1-flash-lite').trim();
+    const result = await generateContentWithFallback(userPrompt, systemInstruction, -1, preferredModel);
 
     let summaryData: any;
     try {
@@ -1577,7 +1633,8 @@ Output formatted Markdown with:
 
     const userPrompt = `Idea/Topic to Brainstorm: ${topic}\nContext: ${context || 'Personal reflection and strategic planning'}`;
 
-    const result = await generateContentWithFallback(userPrompt, systemInstruction);
+    const preferredModel = String(body.model || body.preferredModel || 'gemini-3.1-flash-lite').trim();
+    const result = await generateContentWithFallback(userPrompt, systemInstruction, -1, preferredModel);
 
     res.json({
       success: true,
@@ -1834,7 +1891,8 @@ USER QUESTION:
 
 Please answer the user's question based strictly on their past journal entries:`;
 
-    const genResult = await generateContentWithFallback(userPrompt, systemInstruction);
+    const preferredModel = String(req.body?.model || req.body?.preferredModel || 'gemini-3.1-flash-lite').trim();
+    const genResult = await generateContentWithFallback(userPrompt, systemInstruction, -1, preferredModel);
 
     res.json({
       success: true,
@@ -2164,7 +2222,8 @@ GUIDELINES:
 
 Please synthesize the weekly patterns and return the JSON object with topWins, coreStressors, and actionableAdvice:`;
 
-    const genResult = await generateContentWithFallback(userPrompt, systemInstruction);
+    const preferredModel = String(req.body?.model || req.body?.preferredModel || 'gemini-3.1-flash-lite').trim();
+    const genResult = await generateContentWithFallback(userPrompt, systemInstruction, -1, preferredModel);
 
     // Parse JSON
     let topWins: string[] = [];

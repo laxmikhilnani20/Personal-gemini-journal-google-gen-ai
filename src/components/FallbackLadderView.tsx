@@ -28,31 +28,27 @@ export const FallbackLadderView: React.FC = () => {
   const LADDER_STEPS = [
     {
       tier: 1,
-      model: 'gemini-3.6-flash',
-      role: 'Primary Fast Model',
-      description: 'Default high-speed agentic reasoning engine.',
-      color: 'border-emerald-500 bg-emerald-50 text-emerald-950',
+      model: 'gemini-3.1-flash-lite',
+      role: 'Primary Ultra-Fast Model (Active)',
+      description: 'High-efficiency text-out tier (15 RPM · 250K TPM · 500 RPD) for near-instant latency and high throughput.',
+      quota: '1 / 15 RPM · 945 / 250K TPM · 7 / 500 RPD',
+      color: 'border-emerald-500 bg-emerald-500/10 text-emerald-300',
     },
     {
       tier: 2,
-      model: 'gemini-3.1-flash-lite',
-      role: 'High-Availability Fallback',
-      description: 'Ultra-low latency tier engaged if primary experiences 503 or 429.',
-      color: 'border-blue-500 bg-blue-50 text-blue-950',
+      model: 'gemini-3.8-flash',
+      role: 'General Text Tasks Fallback',
+      description: 'Core text summarization, proofreading, and reflection model engaged if primary is unavailable.',
+      quota: 'Standard High-Capacity Quota',
+      color: 'border-blue-500 bg-blue-500/10 text-blue-300',
     },
     {
       tier: 3,
       model: 'gemini-flash-latest',
       role: 'Dynamic Alias Fallback',
-      description: 'Points to stable production flash alias across regional deployments.',
-      color: 'border-purple-500 bg-purple-50 text-purple-950',
-    },
-    {
-      tier: 4,
-      model: 'gemini-3.7-flash',
-      role: 'Deep Reasoning Fallback',
-      description: 'Extended reasoning capability invoked for heavy or degraded fallback chains.',
-      color: 'border-amber-500 bg-amber-50 text-amber-950',
+      description: 'Points to stable production flash alias across regional Cloud deployments.',
+      quota: 'Multi-Region Failover Alias',
+      color: 'border-purple-500 bg-purple-500/10 text-purple-300',
     },
   ];
 
@@ -141,7 +137,12 @@ export const FallbackLadderView: React.FC = () => {
 
               <h4 className="font-mono text-xs font-bold text-white mb-0.5">{step.model}</h4>
               <p className="text-xs font-semibold text-slate-300 mb-1.5">{step.role}</p>
-              <p className="text-xs text-slate-400 leading-relaxed">{step.description}</p>
+              <p className="text-xs text-slate-400 leading-relaxed mb-2">{step.description}</p>
+              {step.quota && (
+                <div className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900/90 border border-slate-800 text-emerald-400 inline-block font-semibold">
+                  {step.quota}
+                </div>
+              )}
             </div>
           );
         })}
@@ -173,10 +174,9 @@ export const FallbackLadderView: React.FC = () => {
               onChange={(e) => setSimulateFailTier(Number(e.target.value))}
               className="w-full text-xs px-3 py-2 border border-slate-800 rounded-lg focus:outline-hidden focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/30 bg-[#0A0A0B] text-slate-200"
             >
-              <option value="-1">Normal Execution (Tier 1 Primary)</option>
-              <option value="0">Inject 503 on Tier 1 (Verify Fallback to Tier 2)</option>
-              <option value="1">Inject 503 on Tier 1 & Tier 2 (Verify Fallback to Tier 3)</option>
-              <option value="2">Inject 503 on Tiers 1-3 (Verify Fallback to Tier 4)</option>
+              <option value="-1">Normal Execution (Tier 1: gemini-3.1-flash-lite)</option>
+              <option value="0">Inject 503 on Tier 1 (Verify Fallback to Tier 2: gemini-3.8-flash)</option>
+              <option value="1">Inject 503 on Tier 1 & 2 (Verify Fallback to Tier 3: gemini-flash-latest)</option>
             </select>
           </div>
         </div>

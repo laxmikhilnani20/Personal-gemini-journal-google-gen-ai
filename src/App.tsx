@@ -277,8 +277,8 @@ export default function App() {
             </span>
             <span className="text-slate-700">|</span>
             <span className="flex items-center gap-1.5 text-slate-300">
-              <CloudLightning className="w-3.5 h-3.5 text-blue-400" />
-              Engine: gemini-3.6-flash
+              <CloudLightning className="w-3.5 h-3.5 text-emerald-400" />
+              Engine: gemini-3.1-flash-lite
             </span>
             <span className="text-slate-700">|</span>
             <span className="text-slate-400">
@@ -288,7 +288,7 @@ export default function App() {
 
           <div className="flex items-center gap-2 text-[11px] text-slate-500">
             <Award className="w-3 h-3 text-emerald-400" />
-            <span>Directive Compliance: Firebase Auth + Cloud Firestore + Gemini 3.6 Flash</span>
+            <span>Directive Compliance: Firebase Auth + Cloud Firestore + Gemini 3.1 Flash Lite</span>
           </div>
         </div>
       </footer>

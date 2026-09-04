@@ -123,6 +123,7 @@ export const ChatWithPastView: React.FC<ChatWithPastViewProps> = ({
           createdAt: s.createdAt,
           updatedAt: s.updatedAt,
         })),
+        model: 'gemini-3.1-flash-lite',
       };
 
       const res = await fetch('/api/journal/chat-with-past', {
@@ -144,7 +145,7 @@ export const ChatWithPastView: React.FC<ChatWithPastViewProps> = ({
         answer: data.answer || 'No response returned from the model.',
         timestamp: new Date().toISOString(),
         entriesAnalyzed: typeof data.entriesAnalyzed === 'number' ? data.entriesAnalyzed : 0,
-        modelUsed: data.modelUsed || 'gemini-3.8-flash',
+        modelUsed: data.modelUsed || 'gemini-3.1-flash-lite',
         latencyMs: data.latencyMs,
         sourceEntries: data.entries || [],
       };
@@ -308,7 +309,7 @@ export const ChatWithPastView: React.FC<ChatWithPastViewProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-bold text-emerald-400">Gemini Grounded Memory</span>
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
-                      {exchange.modelUsed || 'gemini-3.8-flash'}
+                      {exchange.modelUsed || 'gemini-3.1-flash-lite'}
                     </span>
                     {typeof exchange.entriesAnalyzed === 'number' && (
                       <span className="text-[11px] font-mono text-slate-400">

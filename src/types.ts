@@ -97,6 +97,7 @@ export interface JournalTurn {
   isFutureSelf?: boolean;
   letterFrom2031?: string;
   rawThought?: string;
+  modelUsed?: string;
 }
 
 export interface ReflectionSummary {
